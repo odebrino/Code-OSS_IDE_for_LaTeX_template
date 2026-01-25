@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Virtualenv
+.venv/
+venv/
+
+# PyCharm
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Outputs
+*.pdf
+
+# Build/temp (inclui a pasta que usamos para o snap)
+co-diagramador-build/
+.build/
+
+# Logs
+*.log
