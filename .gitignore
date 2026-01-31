@@ -24,3 +24,7 @@ co-diagramador-build/
 
 # Logs
 *.log
+
+# Antigravity
+.antigravity/
+.agent/

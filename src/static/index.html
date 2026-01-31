@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CO Diagramador</title>
+    <!-- Fonts -->
+    <link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@400;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+
+<body>
+
+    <!-- SPLASH SCREEN -->
+    <div id="splash-screen">
+        <div class="logo-container">
+            <img src="/static/logo.jpg" alt="CO Logo" class="splash-logo">
+        </div>
+    </div>
+
+    <!-- MAIN APP CONTAINER (Hidden initially) -->
+    <div id="app-container" class="hidden">
+
+        <!-- HOME PAGE -->
+        <section id="home-view" class="view active">
+            <header class="main-header">
+                <img src="/static/logo.jpg" alt="Logo Small" class="header-logo">
+                <h1>CO Diagramador</h1>
+            </header>
+
+            <div class="menu-grid">
+                <button class="menu-card" onclick="navigateTo('diagram-view')">
+                    <span class="icon">✏️</span>
+                    <h3>Diagramar Tarefa</h3>
+                </button>
+                <button class="menu-card" onclick="alert('Funcionalidade em desenvolvimento')">
+                    <span class="icon">📂</span>
+                    <h3>Suas Tarefas</h3>
+                </button>
+                <button class="menu-card" onclick="navigateTo('modelo-view')">
+                    <span class="icon">📄</span>
+                    <h3>Modelo de Tarefa</h3>
+                </button>
+                <button class="menu-card" onclick="alert('Funcionalidade em desenvolvimento')">
+                    <span class="icon">📅</span>
+                    <h3>Cronograma</h3>
+                </button>
+            </div>
+        </section>
+
+        <!-- MODELO DE TAREFA VIEW -->
+        <section id="modelo-view" class="view">
+            <header class="section-header">
+                <button class="back-btn" onclick="navigateTo('home-view')">← Voltar</button>
+                <h2>Modelo de Tarefa</h2>
+            </header>
+
+            <form id="templateForm">
+                <div class="form-block primary-block">
+                    <label>Nome do Modelo</label>
+                    <input type="text" name="name" id="tpl-name" placeholder="Ex: Gincana 2025" required>
+                </div>
+
+                <div class="form-block primary-block">
+                    <label>Edição da Gincana</label>
+                    <input type="text" name="edition" id="tpl-edition" placeholder="Ex: 40" required>
+                </div>
+
+                <div class="form-block primary-block">
+                    <label>Dias do Evento</label>
+                    <input type="text" name="days" id="tpl-days" placeholder="Ex: 2, 3, 4, 5 DE ABRIL DE 2025" required>
+                </div>
+
+                <div class="form-block primary-block">
+                    <label>Patrocinadores</label>
+                    <textarea name="sponsors" id="tpl-sponsors" rows="4"
+                        placeholder="Liste os patrocinadores (um por linha)"></textarea>
+                </div>
+
+                <div class="actions">
+                    <button type="submit" class="btn-primary">💾 Salvar Modelo</button>
+                </div>
+            </form>
+
+            <div id="template-status" class="hidden"></div>
+        </section>
+
+        <!-- DIAGRAM VIEW (The Form) -->
+        <section id="diagram-view" class="view">
+            <header class="section-header">
+                <button class="back-btn" onclick="navigateTo('home-view')">← Voltar</button>
+                <h2>Diagramar Tarefa</h2>
+            </header>
+
+            <!-- Model Indicator -->
+            <div class="model-indicator">
+                <span class="model-label">📄 Modelo:</span>
+                <span id="current-model-name">Nenhum modelo configurado</span>
+            </div>
+
+            <form id="taskForm">
+                <!-- Principal Blocks -->
+                <div class="form-block primary-block">
+                    <label>Título da Tarefa</label>
+                    <input type="text" name="title" placeholder="Ex: TAREFA 03" required>
+                </div>
+
+                <div class="form-block primary-block">
+                    <label>Texto da Tarefa</label>
+                    <textarea name="intro" rows="6" placeholder="Digite o conteúdo da tarefa aqui..."
+                        required></textarea>
+                </div>
+
+                <div class="form-block primary-block">
+                    <label>Integrantes</label>
+                    <textarea name="members" rows="3" placeholder="Liste os integrantes... (Opcional)"></textarea>
+                </div>
+
+                <!-- Secondary/Details (Collapsible or just standard) -->
+                <details class="details-block">
+                    <summary>Detalhes do Cronograma & Cabeçalho</summary>
+                    <div class="grid-2">
+                        <div>
+                            <label>Série/Ano</label>
+                            <input type="text" name="series" value="Gincana 2025">
+                        </div>
+                        <div>
+                            <label>Dificuldade</label>
+                            <select name="difficulty">
+                                <option value="Fácil">Fácil</option>
+                                <option value="Médio" selected>Médio</option>
+                                <option value="Difícil">Difícil</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <h4>Divulgação</h4>
+                    <div class="grid-3">
+                        <input type="text" name="date_release" placeholder="Data (Dd/Mm/Aa)">
+                        <input type="text" name="time_release" placeholder="Hora (Xx:Xx)">
+                        <input type="text" name="location_release" placeholder="Local">
+                    </div>
+
+                    <h4>Cumprimento</h4>
+                    <div class="grid-3">
+                        <input type="text" name="date_compliance" placeholder="Data">
+                        <input type="text" name="time_compliance" placeholder="Hora">
+                        <input type="text" name="location_compliance" placeholder="Local">
+                    </div>
+                </details>
+
+                <div class="actions">
+                    <button type="submit" class="btn-primary">Gerar PDF</button>
+                </div>
+            </form>
+
+            <div id="status" class="hidden"></div>
+        </section>
+
+    </div>
+
+    <script src="/static/script.js"></script>
+</body>
+
+</html>

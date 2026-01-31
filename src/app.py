@@ -11,7 +11,7 @@ from tkinter import filedialog, messagebox
 
 # ===== Paths (projeto) =====
 PROJECT_ROOT = Path(__file__).resolve().parents[1]  # .../CO
-TEMPLATE_PATH = PROJECT_ROOT / "template" / "template.tex"
+TEMPLATE_PATH = PROJECT_ROOT / "template" / "cabecalho.tex"
 PLACEHOLDER = "%%CONTENT%%"
 
 
@@ -107,7 +107,7 @@ def build_pdf(user_text: str, output_pdf: Path) -> Path:
     template = TEMPLATE_PATH.read_text(encoding="utf-8")
 
     if PLACEHOLDER not in template:
-        raise RuntimeError(f"Seu template.tex precisa conter o placeholder: {PLACEHOLDER}")
+        raise RuntimeError(f"Seu cabecalho.tex precisa conter o placeholder: {PLACEHOLDER}")
 
     content = plaintext_to_latex(user_text)
     tex = template.replace(PLACEHOLDER, content)

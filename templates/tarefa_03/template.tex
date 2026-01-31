@@ -1,0 +1,166 @@
+% !TEX program = lualatex
+\documentclass[a4paper]{article}
+
+\usepackage[a4paper,top=1.0cm,bottom=1.5cm,left=1.5cm,right=1.5cm]{geometry}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{array}
+\usepackage{fontspec}
+\usepackage{tabularx}
+\usepackage{colortbl}
+\usepackage[normalem]{ulem} % For underlining
+\usepackage[framemethod=tikz]{mdframed}
+
+\pagestyle{empty}
+\setlength{\parindent}{0pt}
+
+% =========================
+% Paths
+% =========================
+\newcommand{\LogoPath}{/home/odebrino/Documents/CO/templates/tarefa_03/images/bandeiras.png}
+
+\definecolor{HeaderGray}{gray}{0.55}
+
+% =========================
+% Fonts
+% =========================
+% Header
+\IfFontExistsTF{TeX Gyre Heros}{
+  \newfontfamily\FontHeaderSans{TeX Gyre Heros}
+  \IfFontExistsTF{TeX Gyre Heros Cn}{
+      \newfontfamily\FontHeaderCondensed{TeX Gyre Heros Cn}
+  }{
+      \newfontfamily\FontHeaderCondensed{TeX Gyre Heros}
+  }
+  \newfontfamily\FontHeaderScript{TeX Gyre Chorus}
+}{
+  \sffamily
+  \newcommand{\FontHeaderSans}{\sffamily}
+  \newcommand{\FontHeaderCondensed}{\sffamily\bfseries}
+  \newcommand{\FontHeaderScript}{\itshape}
+}
+
+% Body
+\IfFontExistsTF{Comic Neue}{
+  \newfontfamily\FontBody{Comic Neue}
+}{
+  \IfFontExistsTF{Comic Sans MS}{
+      \newfontfamily\FontBody{Comic Sans MS}
+  }{
+      \sffamily\newcommand{\FontBody}{\sffamily}
+  }
+}
+
+\begin{document}
+
+% =========================
+% HEADER
+% =========================
+\vspace*{-0.5cm}
+\begin{center}
+\renewcommand{\arraystretch}{1.0}
+\begin{tabular}{@{}
+  m{2.00cm} @{\hspace{1.2mm}}
+  m{1.90cm} @{\hspace{1.6mm}}
+  m{4.05cm} @{\hspace{1.2mm}}
+  m{0.25cm} @{\hspace{1.6mm}}
+  m{8.75cm}
+@{}}
+% Logo
+\centering
+\includegraphics[width=1.90cm]{\LogoPath}
+&
+% Edition
+\centering
+{\FontHeaderSans\bfseries\fontsize{46}{46}\selectfont
+  \VAR{edition}%
+  \raisebox{0.55ex}{{\FontHeaderSans\bfseries\fontsize{20}{20}\selectfont ª}}
+}
+&
+% GINCANA
+\raggedright
+{%
+{\FontHeaderCondensed\bfseries\fontsize{24}{24}\selectfont \mbox{GINCANA}}\\[-0.12cm]
+{\FontHeaderScript\fontsize{20}{20}\selectfont \raisebox{0.1ex}{do}}%
+\hspace{0.8mm}%
+{\FontHeaderCondensed\bfseries\fontsize{24}{24}\selectfont \mbox{GEAT}}%
+}
+&
+% Divider
+\centering
+\raisebox{0.08cm}{\rule{1.6pt}{1.45cm}}
+&
+% Date
+\raggedright
+{%
+{\FontHeaderSans\bfseries\fontsize{15}{15}\selectfont
+  \mbox{DIAS \VAR{days} DE \VAR{month} DE \VAR{year}}%
+}\\[-0.7mm]
+{\FontHeaderSans\fontsize{14}{14}\selectfont\color{HeaderGray}
+  \mbox{Colégio Evangélico Alberto Torres}%
+}%
+}
+\end{tabular}
+\end{center}
+
+\vspace{0.2cm}
+
+% =========================
+% BODY
+% =========================
+\begingroup
+\FontBody
+\fontsize{12}{15}\selectfont
+
+% TITLE
+\begin{center}
+\textbf{\fontsize{20}{24}\selectfont \VAR{title}}
+\end{center}
+
+\vspace{0.3cm}
+
+% DIVULGAÇÃO
+\noindent
+\textbf{\underline{Divulgação:}}
+
+\vspace{0.3cm}
+
+\noindent
+\begin{tabular}{@{}l@{\hspace{1cm}}l@{\hspace{1cm}}l@{}}
+  \underline{Data:} \VAR{date_release} & \underline{Hora:} \VAR{time_release} & \underline{Local:} \VAR{location_release}
+\end{tabular}
+
+\vspace{0.3cm}
+
+% INTRO BOX
+\begin{mdframed}[
+    linecolor=black,
+    linewidth=1.0pt,
+    roundcorner=0pt,
+    innerleftmargin=10pt,
+    innerrightmargin=10pt,
+    innertopmargin=10pt,
+    innerbottommargin=10pt
+]
+    \noindent
+    \VAR{intro}
+\end{mdframed}
+
+\vspace{0.5cm}
+
+% CUMPRIMENTO
+\noindent
+\textbf{\underline{Cumprimento:}}
+
+\vspace{0.3cm}
+
+\noindent
+\begin{tabular}{@{}l@{\hspace{1cm}}l@{\hspace{1cm}}l@{}}
+  \underline{Data:} \VAR{date_compliance} & \underline{Hora:} \VAR{time_compliance} & \underline{Local:} \VAR{location_compliance}
+\end{tabular}
+
+\vspace{0.5cm}
+
+% (Sections removed as requested)
+\endgroup
+\end{document}

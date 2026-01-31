@@ -1,0 +1,44 @@
+       Proposta da Plataforma para CO
+        A ideia é criar um único programa que centralize tudo o que a CO precisa, mas
+minha prioridade inicial é a diagramação. A ideia é que seja um sistema extremamente
+simples de usar, mais fácil que word ou docs e que mesmo os ceatinhos possam entregar a
+tarefa já diagramada porque tudo será automatizado.
+
+
+       Interface
+       O programa vai ter uma interface visual em blocos (tipo um site) que cada ceatinho:
+
+                         1.​ escolhe o tipo de tarefa​
+
+                         2.​ seleciona o nível de dificuldade​
+
+                         3.​ define o título​
+
+                         4.​ cola o texto de introdução​
+
+                         5.​ escolhe o número de alunos e a série​
+
+                         6.​ faz o upload das imagens necessárias
+
+       Então o sistema gera automaticamente um PDF final já diagramado, sem que vocês
+precisem se preocupar com a diagramação.
+
+       LaTeX
+        Por trás da interface, o programa usa uma linguagem de programação chamada
+LaTeX, que foi desenvolvida para gerar documentos profissionais, que eu uso muito na
+faculdade provavelmente vocês vão usar ou usam já. Como é complicado aprender a usar
+essa linguagem de programação a ideia é que na interface sejam coletados os dados e o
+sistema compila com LaTeX no template pronto da diagramação da tarefa e gera o PDF
+pronto, assim ninguém precisa se preocupar com nada.​
+​       (Além disso, vou fazer ele gerar também um arquivo da tarefa para que sempre seja
+fácil modificar posteriormente.)
+
+
+       Outras ideias
+       Como todos os dados são salvos no computador, com esse programa também dá
+para automatizar outras coisas como o cronograma, a planilha de alimentos, horários, … E
+também posso fazer ele plotar automaticamente gráficos para vocês conseguirem analisar
+de forma mais rápida e fácil quantas tarefas tem de campo, teóricas,... quantas tarefas tem
+para cada série,... quantas tarefas tem de cada tema (séries, futebol,...) e também organizar
+informações para correção, …
+

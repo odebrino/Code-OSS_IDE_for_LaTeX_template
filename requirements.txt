@@ -1,0 +1,4 @@
+fastapi
+uvicorn
+python-multipart
+# tectonic  <-- Assuming user installs binary via snap or it's in bin, but we can add python wrapper if needed.
