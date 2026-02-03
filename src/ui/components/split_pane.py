@@ -24,12 +24,13 @@ class SplitPane(ctk.CTkFrame):
         self._max_ratio = max_ratio
         self._divider_width = max(2, divider_width)
 
-        self.left = ctk.CTkFrame(self, fg_color=self._bg)
-        self.right = ctk.CTkFrame(self, fg_color=self._bg)
+        self.left = ctk.CTkFrame(self, fg_color=self._bg, width=1, height=1)
+        self.right = ctk.CTkFrame(self, fg_color=self._bg, width=1, height=1)
         self.divider = ctk.CTkFrame(
             self,
             fg_color=divider_color or COLORS["border"],
             width=self._divider_width,
+            height=1,
             cursor="sb_h_double_arrow",
         )
 
@@ -48,9 +49,12 @@ class SplitPane(ctk.CTkFrame):
         left_w = max(120, min(left_w, width - 120 - self._divider_width))
         right_w = max(1, width - left_w - self._divider_width)
 
-        self.left.place(x=0, y=0, width=left_w, height=height)
-        self.divider.place(x=left_w, y=0, width=self._divider_width, height=height)
-        self.right.place(x=left_w + self._divider_width, y=0, width=right_w, height=height)
+        self.left.configure(width=left_w, height=height)
+        self.divider.configure(width=self._divider_width, height=height)
+        self.right.configure(width=right_w, height=height)
+        self.left.place(x=0, y=0)
+        self.divider.place(x=left_w, y=0)
+        self.right.place(x=left_w + self._divider_width, y=0)
 
     def _start_drag(self, _event) -> None:
         self._dragging = True
