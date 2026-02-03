@@ -29,12 +29,19 @@ def _compose_polaroid(
     if cached:
         return cached
 
+    frame = None
     if FRAME_PATH.exists():
-        frame = Image.open(FRAME_PATH).convert("RGBA")
-    else:
+        try:
+            frame = Image.open(FRAME_PATH).convert("RGBA")
+        except Exception:
+            frame = None
+    if frame is None:
         frame = Image.new("RGBA", (1046, 1266), (255, 255, 255, 255))
 
-    photo = Image.open(photo_path).convert("RGBA")
+    try:
+        photo = Image.open(photo_path).convert("RGBA")
+    except Exception:
+        photo = Image.new("RGBA", (frame.width, frame.height), (255, 255, 255, 255))
     inner_w = int(frame.width * 0.78)
     inner_h = int(frame.height * 0.62)
     photo = ImageOps.fit(photo, (inner_w, inner_h), Image.Resampling.LANCZOS)
@@ -131,7 +138,7 @@ class PolaroidCard(ctk.CTkFrame):
         self._image = None
         self._update_image()
 
-        for widget in (self, self.image_label):
+        for widget in (self, self.image_label, self.caption_label):
             widget.bind("<Button-1>", self._on_press)
             widget.bind("<B1-Motion>", self._on_drag)
             widget.bind("<ButtonRelease-1>", self._on_release)
