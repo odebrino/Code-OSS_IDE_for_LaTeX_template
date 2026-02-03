@@ -35,11 +35,11 @@ class App(ctk.CTk):
 
         storage_root = ensure_storage_layout()
         globals_map = load_globals(storage_root)
-        self.state = AppState(storage_root=storage_root, globals_map=globals_map)
+        self.app_state = AppState(storage_root=storage_root, globals_map=globals_map)
 
-        self.state.templates = template_controller.load_templates(storage_root)
-        if not self.state.templates:
-            self.state.templates = template_controller.load_templates(storage_root)
+        self.app_state.templates = template_controller.load_templates(storage_root)
+        if not self.app_state.templates:
+            self.app_state.templates = template_controller.load_templates(storage_root)
 
         self.current_step = 0
         self.steps = []
@@ -68,7 +68,7 @@ class App(ctk.CTk):
         self.page_container = ctk.CTkFrame(body, fg_color=COLORS["logo_bg"])
         self.page_container.pack(fill="both", expand=True)
 
-        self.home_view = HomeView(self.page_container, LOGO_PATH, self.state.storage_root)
+        self.home_view = HomeView(self.page_container, LOGO_PATH, self.app_state.storage_root)
         self.home_view.pack(fill="both", expand=True)
 
         self.editor_view = EditorView(self.page_container, on_status=self.set_status)
@@ -86,14 +86,14 @@ class App(ctk.CTk):
 
         self.basic_step = BasicStep(
             self.step_container,
-            self.state,
-            template_ids=[t.id for t in self.state.templates] or ["plain"],
+            self.app_state,
+            template_ids=[t.id for t in self.app_state.templates] or ["plain"],
             on_template_change=self.on_template_change,
         )
-        self.content_step = ContentStep(self.step_container, self.state)
-        self.assets_step = AssetsStep(self.step_container, self.state)
-        self.notes_step = NotesStep(self.step_container, self.state)
-        self.review_step = ReviewStep(self.step_container, self.state)
+        self.content_step = ContentStep(self.step_container, self.app_state)
+        self.assets_step = AssetsStep(self.step_container, self.app_state)
+        self.notes_step = NotesStep(self.step_container, self.app_state)
+        self.review_step = ReviewStep(self.step_container, self.app_state)
 
         self.steps = [
             self.basic_step,
@@ -129,7 +129,7 @@ class App(ctk.CTk):
         self.status_label.pack(anchor="w", padx=SPACING["pad_x"], pady=SPACING["pad_small"])
 
     def _init_templates(self) -> None:
-        template_ids = [t.id for t in self.state.templates] or ["plain"]
+        template_ids = [t.id for t in self.app_state.templates] or ["plain"]
         self.basic_step.set_templates(template_ids)
 
         default_id = template_ids[0]
@@ -137,15 +137,15 @@ class App(ctk.CTk):
         self.basic_step.set_template(default_id)
 
     def set_template(self, template_id: str) -> None:
-        result = template_controller.set_template(self.state.storage_root, template_id)
+        result = template_controller.set_template(self.app_state.storage_root, template_id)
         if not result:
             messagebox.showerror("Erro", f"Template nao encontrado: {template_id}")
             return
         model, tex_path = result
-        self.state.template_model = model
-        self.state.template_tex_path = tex_path
+        self.app_state.template_model = model
+        self.app_state.template_tex_path = tex_path
         self.sidebar.set_template_label(f"Template: {model.id} v{model.version}")
-        self.state.fields = {}
+        self.app_state.fields = {}
         self.content_step.rebuild_fields()
         self.content_step.load_from_state()
 
@@ -183,7 +183,7 @@ class App(ctk.CTk):
             prev_enabled=self.current_step > 0,
             next_enabled=self.current_step < len(self.steps) - 1,
         )
-        self.sidebar.set_save_enabled(self.state.last_pdf_path is not None)
+        self.sidebar.set_save_enabled(self.app_state.last_pdf_path is not None)
 
     def apply_current(self) -> None:
         self.steps[self.current_step].apply_to_state()
@@ -198,7 +198,7 @@ class App(ctk.CTk):
 
     def on_generate(self) -> None:
         self.apply_current()
-        valid, msg = task_controller.validate_required(self.state)
+        valid, msg = task_controller.validate_required(self.app_state)
         if not valid:
             messagebox.showwarning("Aviso", msg)
             return
@@ -213,8 +213,8 @@ class App(ctk.CTk):
 
         self.set_status("Gerando PDF...")
         try:
-            pdf = task_controller.generate_pdf(self.state, Path(out))
-            self.state.last_pdf_path = pdf
+            pdf = task_controller.generate_pdf(self.app_state, Path(out))
+            self.app_state.last_pdf_path = pdf
             self.sidebar.set_save_enabled(True)
             self.set_status(f"PDF salvo em {pdf}")
             messagebox.showinfo("OK", f"PDF gerado:\n{pdf}")
@@ -224,7 +224,7 @@ class App(ctk.CTk):
 
     def on_save(self) -> None:
         try:
-            task_dir = task_controller.save_task_from_state(self.state)
+            task_dir = task_controller.save_task_from_state(self.app_state)
             self.set_status(f"Tarefa salva em {task_dir}")
             messagebox.showinfo("OK", f"Tarefa salva em:\n{task_dir}")
         except Exception as exc:
@@ -232,13 +232,13 @@ class App(ctk.CTk):
             messagebox.showerror("Erro", str(exc))
 
     def on_history(self) -> None:
-        HistoryWindow(self, self.state.storage_root, self.load_task)
+        HistoryWindow(self, self.app_state.storage_root, self.load_task)
 
     def on_open_storage(self) -> None:
-        open_path(self.state.storage_root)
+        open_path(self.app_state.storage_root)
 
     def on_new_task(self) -> None:
-        self.state.basic.update(
+        self.app_state.basic.update(
             {
                 "title": "",
                 "task_type": "pratica",
@@ -250,10 +250,10 @@ class App(ctk.CTk):
                 "categories": "",
             }
         )
-        self.state.fields = {}
-        self.state.assets = []
-        self.state.notes = {"good": "", "bad": ""}
-        self.state.last_pdf_path = None
+        self.app_state.fields = {}
+        self.app_state.assets = []
+        self.app_state.notes = {"good": "", "bad": ""}
+        self.app_state.last_pdf_path = None
         self.sidebar.set_save_enabled(False)
         self.basic_step.load_from_state()
         self.content_step.rebuild_fields()
@@ -265,7 +265,7 @@ class App(ctk.CTk):
         self.set_status("Nova tarefa")
 
     def load_task(self, task, task_dir: Path) -> None:
-        self.state.basic.update(
+        self.app_state.basic.update(
             {
                 "title": task.title,
                 "task_type": task.task_type,
@@ -282,19 +282,19 @@ class App(ctk.CTk):
             self.set_template(task.template_id)
             self.basic_step.set_template(task.template_id)
 
-        self.state.fields = dict(task.fields)
-        self.state.assets = []
+        self.app_state.fields = dict(task.fields)
+        self.app_state.assets = []
         for asset in task.assets:
             rel = asset.get("file")
             caption = asset.get("caption", "")
             if rel:
-                self.state.assets.append({"path": str(task_dir / rel), "caption": caption})
+                self.app_state.assets.append({"path": str(task_dir / rel), "caption": caption})
 
-        self.state.notes = {"good": task.notes_good, "bad": task.notes_bad}
+        self.app_state.notes = {"good": task.notes_good, "bad": task.notes_bad}
 
         pdf_path = task_dir / "output.pdf"
-        self.state.last_pdf_path = pdf_path if pdf_path.exists() else None
-        self.sidebar.set_save_enabled(self.state.last_pdf_path is not None)
+        self.app_state.last_pdf_path = pdf_path if pdf_path.exists() else None
+        self.sidebar.set_save_enabled(self.app_state.last_pdf_path is not None)
 
         self.basic_step.load_from_state()
         self.content_step.rebuild_fields()
@@ -336,8 +336,8 @@ class App(ctk.CTk):
 
     def on_tasks(self) -> None:
         self.left_nav.set_active("tasks")
-        HistoryWindow(self, self.state.storage_root, self.load_task)
+        HistoryWindow(self, self.app_state.storage_root, self.load_task)
 
     def on_gincanas(self) -> None:
         self.left_nav.set_active("gincanas")
-        HistoryWindow(self, self.state.storage_root, self.load_task)
+        HistoryWindow(self, self.app_state.storage_root, self.load_task)
