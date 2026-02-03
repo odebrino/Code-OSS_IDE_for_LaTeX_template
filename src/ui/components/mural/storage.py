@@ -22,7 +22,10 @@ def load_state(path: Path) -> Tuple[List[PolaroidState], int]:
                     x=float(item.get("x", 0.5)),
                     y=float(item.get("y", 0.5)),
                     rotation=float(item.get("rotation", 0.0)),
+                    scale=float(item.get("scale", 1.0)),
                     photo=photo,
+                    caption=str(item.get("caption", "")),
+                    z_index=int(item.get("z_index", 0)),
                 )
             )
         except Exception:
@@ -40,7 +43,10 @@ def save_state(path: Path, items: List[PolaroidState], next_index: int) -> None:
                 "x": item.x,
                 "y": item.y,
                 "rotation": item.rotation,
+                "scale": item.scale,
                 "photo": item.photo,
+                "caption": item.caption,
+                "z_index": item.z_index,
             }
             for item in items
         ],

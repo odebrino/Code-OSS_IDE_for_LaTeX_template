@@ -7,14 +7,15 @@ from typing import Dict, List
 
 import customtkinter as ctk
 from PIL import Image, ImageOps
+from tkinter import filedialog, messagebox
 
 from ui.theme import COLORS
 from ui.animations import animate_color, animate_pulse
-from ui.components.mural.drag import DragController
+from ui.components.mural.drag import DragController, clamp
 from ui.components.mural.polaroid import PolaroidCard
 from ui.components.mural.state import PolaroidState
 from ui.components.mural.storage import load_state, save_state, copy_photo
-from ui.components.mural.assets import list_cat_photos
+from ui.components.mural.assets import list_cat_photos, load_frame_icon
 
 
 class MuralView(ctk.CTkFrame):
@@ -29,10 +30,20 @@ class MuralView(ctk.CTkFrame):
         self._resize_job = None
         self._logo_relx = 0.74
         self._logo_rely = 0.5
+        self._zoom = 1.0
+        self._zoom_min = 0.75
+        self._zoom_max = 1.35
+        self._panning = False
+        self._pan_origin = (0, 0)
+        self._base_card_size = (240, 290)
 
         self.canvas = ctk.CTkFrame(self, fg_color=COLORS["logo_bg"])
         self.canvas.pack(fill="both", expand=True)
         self.canvas.bind("<Configure>", self._on_canvas_resize)
+        self.canvas.bind("<Control-MouseWheel>", self._on_zoom)
+        self.canvas.bind("<ButtonPress-3>", self._on_pan_start)
+        self.canvas.bind("<B3-Motion>", self._on_pan_move)
+        self.canvas.bind("<ButtonRelease-3>", self._on_pan_end)
 
         self.dragger = DragController(self.canvas)
         self._cards: Dict[str, PolaroidCard] = {}
@@ -52,6 +63,7 @@ class MuralView(ctk.CTkFrame):
         self._button_size = 54
         self._button_radius = 27
         self._button_font = ("Segoe UI Emoji", 18)
+        self._button_icon = load_frame_icon()
         self._render_saved()
         self._add_button()
         self._button_base_color = COLORS["polaroid"]
@@ -95,7 +107,7 @@ class MuralView(ctk.CTkFrame):
         width = self.canvas.winfo_width() or 1
         height = self.canvas.winfo_height() or 1
 
-        for state in self._items:
+        for state in sorted(self._items, key=lambda s: s.z_index):
             if not state.photo:
                 continue
             if state.photo and not Path(state.photo).is_absolute():
@@ -107,8 +119,11 @@ class MuralView(ctk.CTkFrame):
                 state,
                 self.dragger,
                 self._on_drop,
+                on_delete=self._delete_card,
+                on_caption=self._on_caption_change,
                 on_drag_start=self._on_drag_start,
                 on_drag_end=self._on_drag_end,
+                display_size=self._current_card_size(),
             )
             self._cards[state.id] = card
             x = state.x * width
@@ -118,7 +133,7 @@ class MuralView(ctk.CTkFrame):
     def _add_button(self) -> None:
         self.add_button = ctk.CTkButton(
             self.canvas,
-            text="🖼️",
+            text="" if self._button_icon else "🖼️",
             width=self._button_size,
             height=self._button_size,
             fg_color=COLORS["polaroid"],
@@ -129,6 +144,7 @@ class MuralView(ctk.CTkFrame):
             border_color=COLORS["polaroid_border"],
             font=self._button_font,
             command=self._on_add_click,
+            image=self._button_icon,
         )
         self.add_button.place(relx=0.94, rely=0.88, anchor="center")
         self._update_add_button()
@@ -145,15 +161,29 @@ class MuralView(ctk.CTkFrame):
     def _on_add_click(self) -> None:
         if self._dragging:
             return
-        if not self._cat_photos or self._next_index >= len(self._cat_photos):
-            self._update_add_button()
+        paths = filedialog.askopenfilenames(
+            title="Selecionar fotos para o mural",
+            filetypes=[("Imagens", "*.png *.jpg *.jpeg")],
+        )
+        if paths:
+            for path in paths:
+                self.add_polaroid_from_path(Path(path))
             return
-        self.add_polaroid()
+        if self._cat_photos and self._next_index < len(self._cat_photos):
+            self.add_polaroid()
+        else:
+            messagebox.showinfo("Mural", "Nenhuma imagem selecionada.")
+            self._update_add_button()
 
     def add_polaroid(self) -> None:
         photo = self._next_cat()
         if not photo:
             self._update_add_button()
+            return
+        self.add_polaroid_from_path(photo)
+
+    def add_polaroid_from_path(self, photo: Path) -> None:
+        if not photo or not photo.exists():
             return
 
         self.canvas.update_idletasks()
@@ -167,16 +197,21 @@ class MuralView(ctk.CTkFrame):
             id=pid,
             x=0.5,
             y=0.5,
-            rotation=random.uniform(-4, 4),
+            rotation=random.uniform(-8, 8),
+            scale=random.uniform(0.96, 1.04),
             photo=str(dest),
+            z_index=self._next_z_index(),
         )
         card = PolaroidCard(
             self.canvas,
             state,
             self.dragger,
             self._on_drop,
+            on_delete=self._delete_card,
+            on_caption=self._on_caption_change,
             on_drag_start=self._on_drag_start,
             on_drag_end=self._on_drag_end,
+            display_size=self._current_card_size(),
         )
         self._cards[state.id] = card
         card.place(x=width / 2, y=height / 2, anchor="center")
@@ -213,16 +248,16 @@ class MuralView(ctk.CTkFrame):
                     x=state.x,
                     y=state.y,
                     rotation=state.rotation,
+                    scale=state.scale,
                     photo=rel,
+                    caption=state.caption,
+                    z_index=state.z_index,
                 )
             items.append(state)
         save_state(self.positions_path, items, self._next_index)
 
     def _update_add_button(self) -> None:
-        if not self._cat_photos or self._next_index >= len(self._cat_photos):
-            self.add_button.configure(state="disabled")
-        else:
-            self.add_button.configure(state="normal")
+        self.add_button.configure(state="normal")
 
     def _on_drag_start(self, _card: PolaroidCard) -> None:
         self._dragging = True
@@ -230,11 +265,16 @@ class MuralView(ctk.CTkFrame):
         animate_pulse(self.add_button, (self._button_size, self._button_size), corner_radius=self._button_radius)
         animate_color(self.add_button, self._button_base_color, self._button_trash_color, duration=140, steps=8)
         self.add_button.configure(text="🗑️", image=None, fg_color=COLORS["danger"], hover_color=COLORS["danger_hover"])
+        self._bring_to_front(_card)
 
     def _on_drag_end(self, _card: PolaroidCard) -> None:
         self._dragging = False
         animate_color(self.add_button, self._button_trash_color, self._button_base_color, duration=140, steps=8)
-        self.add_button.configure(text="🖼️", image=None, fg_color=COLORS["polaroid"], hover_color=COLORS["polaroid_border"])
+        if self._button_icon:
+            self.add_button.configure(text="", image=self._button_icon)
+        else:
+            self.add_button.configure(text="🖼️", image=None)
+        self.add_button.configure(fg_color=COLORS["polaroid"], hover_color=COLORS["polaroid_border"])
         self.add_button.configure(width=self._button_size, height=self._button_size, corner_radius=self._button_radius)
         self._update_add_button()
 
@@ -252,7 +292,9 @@ class MuralView(ctk.CTkFrame):
             self._logo_label.place_configure(relx=self._logo_relx, rely=self._logo_rely)
         width = self.canvas.winfo_width() or 1
         height = self.canvas.winfo_height() or 1
+        self._base_card_size = self._calc_card_size(width, height)
         for card in self._cards.values():
+            card.set_display_size(self._current_card_size())
             card.place(x=card.state.x * width, y=card.state.y * height, anchor="center")
 
     def _is_over_trash(self, card: PolaroidCard) -> bool:
@@ -267,5 +309,82 @@ class MuralView(ctk.CTkFrame):
     def _delete_card(self, card: PolaroidCard) -> None:
         if card.state.id in self._cards:
             self._cards.pop(card.state.id)
-        card.destroy()
+        self._animate_delete(card)
+        self._persist()
+
+    def _animate_delete(self, card: PolaroidCard) -> None:
+        steps = 6
+        start_size = card.display_size
+
+        def step(i: int):
+            if i >= steps:
+                card.destroy()
+                return
+            scale = 1 - (i / steps)
+            size = (max(40, int(start_size[0] * scale)), max(48, int(start_size[1] * scale)))
+            card.set_display_size(size)
+            card.after(25, lambda: step(i + 1))
+
+        step(0)
+
+    def _bring_to_front(self, card: PolaroidCard) -> None:
+        card.lift()
+        card.state.z_index = self._next_z_index()
+
+    def _next_z_index(self) -> int:
+        if not self._cards:
+            return 1
+        return max(c.state.z_index for c in self._cards.values()) + 1
+
+    def _on_caption_change(self, _card: PolaroidCard, _caption: str) -> None:
+        self._persist()
+
+    def _calc_card_size(self, width: int, height: int) -> tuple[int, int]:
+        base = int(min(width, height) * 0.3)
+        base = max(190, min(base, 320))
+        return base, int(base * 1.2)
+
+    def _current_card_size(self) -> tuple[int, int]:
+        return int(self._base_card_size[0] * self._zoom), int(self._base_card_size[1] * self._zoom)
+
+    def _on_zoom(self, event) -> None:
+        if self._dragging:
+            return
+        delta = 0.05 if event.delta > 0 else -0.05
+        self._zoom = max(self._zoom_min, min(self._zoom_max, self._zoom + delta))
+        self._apply_layout()
+
+    def _on_pan_start(self, event) -> None:
+        if self._dragging:
+            return
+        self._panning = True
+        self._pan_origin = (event.x_root, event.y_root)
+
+    def _on_pan_move(self, event) -> None:
+        if not self._panning:
+            return
+        dx = event.x_root - self._pan_origin[0]
+        dy = event.y_root - self._pan_origin[1]
+        self._pan_origin = (event.x_root, event.y_root)
+        self._shift_cards(dx, dy)
+
+    def _on_pan_end(self, _event=None) -> None:
+        self._panning = False
+
+    def _shift_cards(self, dx: float, dy: float) -> None:
+        width = self.canvas.winfo_width() or 1
+        height = self.canvas.winfo_height() or 1
+        for card in self._cards.values():
+            info = card.place_info()
+            x = float(info.get("x", 0)) + dx
+            y = float(info.get("y", 0)) + dy
+            half_w = card.winfo_width() / 2
+            half_h = card.winfo_height() / 2
+            max_x = width - half_w
+            max_y = height - half_h
+            x = clamp(x, half_w, max_x)
+            y = clamp(y, half_h, max_y)
+            card.place_configure(x=x, y=y, anchor="center")
+            card.state.x = x / width
+            card.state.y = y / height
         self._persist()
