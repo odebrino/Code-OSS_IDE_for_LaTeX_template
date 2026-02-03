@@ -18,6 +18,9 @@ Thumbs.db
 # Outputs
 *.pdf
 
+# Local storage (tasks, templates, index)
+storage/
+
 # Build/temp (inclui a pasta que usamos para o snap)
 co-diagramador-build/
 .build/

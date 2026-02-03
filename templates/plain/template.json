@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "id": "plain",
+  "name": "Template Basico",
+  "version": "1",
+  "description": "Template simples para texto puro",
+  "fields": [
+    {
+      "id": "content",
+      "label": "Conteudo",
+      "type": "multiline",
+      "required": true,
+      "placeholder": "Cole o texto aqui"
+    }
+  ],
+  "globals": {}
+}

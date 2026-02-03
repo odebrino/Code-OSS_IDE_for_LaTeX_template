@@ -1,26 +1,44 @@
-# Diagramador (template único)
+# Diagramador (modo local)
 
-App simples: cola texto → gera PDF usando um template LaTeX fixo.
+App local: cola texto e gera PDF usando um template LaTeX fixo.
 
 ## Requisitos
 - Python 3.10+
-- tectonic (recomendado)
+- tectonic (binario local)
   - Ubuntu: `sudo snap install tectonic`
+
+## Estrutura
+- `src/app.py`: interface local (Tkinter).
+- `src/core/`: compilacao LaTeX e utilitarios.
+- `templates/plain/template.tex`: template simples usado pelo app.
+- `templates/tarefa_03/`: template mais complexo (guardado para futura expansao).
+- `storage/`: dados locais (tarefas, templates, indices).
+
+## Storage local
+Por padrao, os dados ficam em `storage/` na raiz do projeto.
+Para usar uma pasta sincronizada (Drive/OneDrive), defina a variavel de ambiente:
+
+```
+CO_STORAGE_ROOT=/caminho/para/pasta
+```
 
 ## Rodar
 
-python src/app.py
+```
+./run.sh
+```
 
-Teste rápido
+Teste rapido:
+
+```
 python src/test_build.py
+```
 
+Se preferir rodar manualmente sem o script:
 
----
-
-## 3) Inicializar Git + commit local ✅
-No terminal, dentro da pasta do projeto (**CO**):
-
-cd ~/Documents/CO
-git init
-git add .
-git commit -m "Initial version: paste text -> PDF using template"
+```
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+python src/app.py
+```
