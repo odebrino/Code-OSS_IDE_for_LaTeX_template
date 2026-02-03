@@ -22,7 +22,7 @@ def escape_latex_text(s: str) -> str:
 
 
 def plaintext_to_latex(text: str) -> str:
-    """
+    r"""
     Converts plain text to LaTeX-safe text with paragraph handling.
     - Blank lines -> new paragraph (\par)
     - Single newlines -> space
