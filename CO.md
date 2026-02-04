@@ -20,6 +20,7 @@ npm install
 ## Build (local)
 
 ```
+npm run fetch-builtin-vsix
 npm run gulp vscode-<platform>-<arch>
 ```
 
@@ -33,3 +34,4 @@ Artifacts are created in `../VSCode-<platform>-<arch>`.
 Notes:
 - ARM builds on CI are marked optional because they can require extra setup on GitHub runners.
 - LaTeX Workshop requires a working TeX toolchain in PATH to compile documents.
+- If the VSIX fetch hits GitHub rate limits, set `GITHUB_TOKEN` and rerun.

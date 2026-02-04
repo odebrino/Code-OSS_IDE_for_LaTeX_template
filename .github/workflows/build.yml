@@ -48,6 +48,11 @@ jobs:
       - name: Install dependencies
         run: npm install
 
+      - name: Fetch built-in VSIX
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node scripts/fetch-builtin-vsix.mjs
+
       - name: Build
         run: npm run gulp ${{ matrix.target }}
 

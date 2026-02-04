@@ -18,6 +18,7 @@
     "test-build-scripts": "cd build && npm run test",
     "preinstall": "node build/npm/preinstall.ts",
     "postinstall": "node build/npm/postinstall.ts",
+    "fetch-builtin-vsix": "node scripts/fetch-builtin-vsix.mjs",
     "compile": "npm run gulp compile",
     "compile-check-ts-native": "tsgo --project ./src/tsconfig.json --noEmit --skipLibCheck",
     "watch": "npm-run-all2 -lp watch-client watch-extensions",

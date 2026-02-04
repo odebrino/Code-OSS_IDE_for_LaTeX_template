@@ -42,10 +42,26 @@ async function ensureCompiled() {
 	}
 }
 
+async function ensureBuiltInVsix() {
+	const productPath = path.join(rootDir, 'product.json');
+	const product = JSON.parse(await fs.readFile(productPath, 'utf8'));
+	const vsixExtensions = (product.builtInExtensions ?? []).filter((ext: { vsix?: string }) => ext.vsix);
+	if (vsixExtensions.length === 0) {
+		return;
+	}
+	for (const extension of vsixExtensions) {
+		if (extension.vsix && !(await exists(extension.vsix))) {
+			await runProcess(process.execPath, ['scripts/fetch-builtin-vsix.mjs']);
+			return;
+		}
+	}
+}
+
 async function main() {
 	await ensureNodeModules();
 	await getElectron();
 	await ensureCompiled();
+	await ensureBuiltInVsix();
 
 	// Can't require this until after dependencies are installed
 	const { getBuiltInExtensions } = await import('./builtInExtensions.ts');
