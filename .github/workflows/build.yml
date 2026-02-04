@@ -8,18 +8,32 @@ on:
 jobs:
   build:
     runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.allow_failure }}
     strategy:
       fail-fast: false
       matrix:
         include:
           - os: ubuntu-latest
             target: vscode-linux-x64
+            allow_failure: false
+          - os: ubuntu-latest
+            target: vscode-linux-arm64
+            allow_failure: true
+          - os: ubuntu-latest
+            target: vscode-linux-armhf
+            allow_failure: true
           - os: windows-latest
             target: vscode-win32-x64
+            allow_failure: false
+          - os: windows-latest
+            target: vscode-win32-arm64
+            allow_failure: true
           - os: macos-13
             target: vscode-darwin-x64
+            allow_failure: false
           - os: macos-14
             target: vscode-darwin-arm64
+            allow_failure: false
 
     steps:
       - uses: actions/checkout@v4
