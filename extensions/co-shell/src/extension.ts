@@ -326,8 +326,8 @@ function runProcess(command: string, args: string[], cwd: string): Promise<{ ok:
 		let stderr = '';
 
 		const child = spawn(command, args, { cwd, shell: process.platform === 'win32' });
-		child.stdout.on('data', data => { stdout += data.toString(); });
-		child.stderr.on('data', data => { stderr += data.toString(); });
+		child.stdout.on('data', (data: Buffer) => { stdout += data.toString(); });
+		child.stderr.on('data', (data: Buffer) => { stderr += data.toString(); });
 
 		child.on('error', (err: any) => {
 			const notFound = err?.code === 'ENOENT';
@@ -337,7 +337,7 @@ function runProcess(command: string, args: string[], cwd: string): Promise<{ ok:
 			resolve({ ok: false, stdout, stderr: `${stderr}\n${err?.message ?? ''}`, friendly, notFound });
 		});
 
-		child.on('close', code => {
+		child.on('close', (code: number | null) => {
 			if (code === 0) {
 				resolve({ ok: true, stdout, stderr, friendly: '', notFound: false });
 			} else {

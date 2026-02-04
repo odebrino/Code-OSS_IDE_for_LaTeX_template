@@ -35,6 +35,7 @@ export const dirs = [
 	'extensions/markdown-language-features',
 	'extensions/markdown-math',
 	'extensions/latex-workshop',
+	'extensions/co-shell',
 	'extensions/media-preview',
 	'extensions/merge-conflict',
 	'extensions/mermaid-chat-features',

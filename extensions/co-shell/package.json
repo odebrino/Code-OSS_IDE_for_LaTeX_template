@@ -24,6 +24,9 @@
 			"supported": true
 		}
 	},
+	"devDependencies": {
+		"@types/node": "^22.18.10"
+	},
 	"contributes": {
 		"commands": [
 			{ "command": "coShell.openStudentHome", "title": "CO: Open Student Home" },
