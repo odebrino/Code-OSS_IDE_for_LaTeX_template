@@ -57,6 +57,11 @@
 		"configuration": {
 			"title": "CO Shell",
 			"properties": {
+				"coShell.closeWorkspace": {
+					"type": "boolean",
+					"default": true,
+					"description": "Fecha o workspace ao entrar no Student Mode (desativado automaticamente em desenvolvimento)."
+				},
 				"coShell.userEmail": {
 					"type": "string",
 					"default": "",

@@ -88,7 +88,7 @@ async function setRole(context: vscode.ExtensionContext, role: Role) {
 }
 
 async function enterStudentMode(context: vscode.ExtensionContext) {
-	await hideUiForStudent();
+	await hideUiForStudent(context);
 	openHomePanel(context, 'student', createMessageHandler(context));
 }
 
@@ -97,14 +97,18 @@ async function enterAdminMode(context: vscode.ExtensionContext) {
 	openHomePanel(context, 'admin', createMessageHandler(context));
 }
 
-async function hideUiForStudent() {
+async function hideUiForStudent(context: vscode.ExtensionContext) {
+	const isDev = context.extensionMode === vscode.ExtensionMode.Development || process.env.VSCODE_DEV === '1';
+	const closeWorkspace = vscode.workspace.getConfiguration('coShell').get<boolean>('closeWorkspace', true);
 	const commands = [
 		'workbench.action.closeAllEditors',
 		'workbench.action.closeSidebar',
 		'workbench.action.closePanel',
-		'workbench.action.closeAuxiliaryBar',
-		'workbench.action.closeFolder'
+		'workbench.action.closeAuxiliaryBar'
 	];
+	if (!isDev && closeWorkspace) {
+		commands.push('workbench.action.closeFolder');
+	}
 
 	for (const command of commands) {
 		try {
