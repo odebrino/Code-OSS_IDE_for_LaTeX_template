@@ -15,6 +15,7 @@ import { inQuickPickContext, defaultQuickAccessContext, getQuickNavigateHandler 
 import { ILocalizedString } from '../../../platform/action/common/action.js';
 import { AnythingQuickAccessProviderRunOptions } from '../../../platform/quickinput/common/quickAccess.js';
 import { Codicon } from '../../../base/common/codicons.js';
+import { ContextKeyExpr } from '../../../platform/contextkey/common/contextkey.js';
 
 //#region Quick access management commands and keys
 
@@ -73,7 +74,7 @@ KeybindingsRegistry.registerCommandAndKeybindingRule({
 	id: quickAccessNavigateNextInFilePickerId,
 	weight: KeybindingWeight.WorkbenchContrib + 50,
 	handler: getQuickNavigateHandler(quickAccessNavigateNextInFilePickerId, true),
-	when: defaultQuickAccessContext,
+	when: ContextKeyExpr.and(defaultQuickAccessContext, ContextKeyExpr.notEquals('co.cozitos', true)),
 	primary: globalQuickAccessKeybinding.primary,
 	secondary: globalQuickAccessKeybinding.secondary,
 	mac: globalQuickAccessKeybinding.mac
@@ -84,7 +85,7 @@ KeybindingsRegistry.registerCommandAndKeybindingRule({
 	id: quickAccessNavigatePreviousInFilePickerId,
 	weight: KeybindingWeight.WorkbenchContrib + 50,
 	handler: getQuickNavigateHandler(quickAccessNavigatePreviousInFilePickerId, false),
-	when: defaultQuickAccessContext,
+	when: ContextKeyExpr.and(defaultQuickAccessContext, ContextKeyExpr.notEquals('co.cozitos', true)),
 	primary: globalQuickAccessKeybinding.primary | KeyMod.Shift,
 	secondary: [globalQuickAccessKeybinding.secondary[0] | KeyMod.Shift],
 	mac: {
@@ -136,7 +137,8 @@ registerAction2(class QuickAccessAction extends Action2 {
 				weight: KeybindingWeight.WorkbenchContrib,
 				primary: globalQuickAccessKeybinding.primary,
 				secondary: globalQuickAccessKeybinding.secondary,
-				mac: globalQuickAccessKeybinding.mac
+				mac: globalQuickAccessKeybinding.mac,
+				when: ContextKeyExpr.notEquals('co.cozitos', true)
 			},
 			f1: true
 		});

@@ -259,6 +259,7 @@ registerAction2(class FindInFilesAction extends Action2 {
 			keybinding: {
 				weight: KeybindingWeight.WorkbenchContrib,
 				primary: KeyMod.CtrlCmd | KeyMod.Shift | KeyCode.KeyF,
+				when: ContextKeyExpr.notEquals('co.cozitos', true)
 			},
 			menu: [{
 				id: MenuId.MenubarEditMenu,

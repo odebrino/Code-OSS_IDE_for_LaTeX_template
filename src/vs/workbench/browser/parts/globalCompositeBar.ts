@@ -62,6 +62,7 @@ export class GlobalCompositeBar extends Disposable {
 		private readonly activityHoverOptions: IActivityHoverOptions,
 		@IConfigurationService configurationService: IConfigurationService,
 		@IInstantiationService private readonly instantiationService: IInstantiationService,
+		@IContextKeyService private readonly contextKeyService: IContextKeyService,
 		@IStorageService private readonly storageService: IStorageService,
 		@IExtensionService private readonly extensionService: IExtensionService,
 	) {
@@ -102,7 +103,7 @@ export class GlobalCompositeBar extends Disposable {
 			preventLoopNavigation: true
 		}));
 
-		if (this.accountsVisibilityPreference) {
+		if (this.accountsVisibilityPreference && !this.isCozitosEnabled()) {
 			this.globalActivityActionBar.push(this.accountAction, { index: GlobalCompositeBar.ACCOUNTS_ACTION_INDEX });
 		}
 
@@ -132,10 +133,19 @@ export class GlobalCompositeBar extends Disposable {
 	}
 
 	getContextMenuActions(): IAction[] {
+		if (this.isCozitosEnabled()) {
+			return [toAction({ id: 'toggleAccountsVisibility', label: localize('accounts', "Accounts"), checked: false, enabled: false, run: () => { } })];
+		}
 		return [toAction({ id: 'toggleAccountsVisibility', label: localize('accounts', "Accounts"), checked: this.accountsVisibilityPreference, run: () => this.accountsVisibilityPreference = !this.accountsVisibilityPreference })];
 	}
 
 	private toggleAccountsActivity() {
+		if (this.isCozitosEnabled()) {
+			if (this.globalActivityActionBar.length() === 2) {
+				this.globalActivityActionBar.pull(GlobalCompositeBar.ACCOUNTS_ACTION_INDEX);
+			}
+			return;
+		}
 		if (this.globalActivityActionBar.length() === 2 && this.accountsVisibilityPreference) {
 			return;
 		}
@@ -152,6 +162,10 @@ export class GlobalCompositeBar extends Disposable {
 
 	private set accountsVisibilityPreference(value: boolean) {
 		setAccountsActionVisible(this.storageService, value);
+	}
+
+	private isCozitosEnabled(): boolean {
+		return this.contextKeyService.getContextKeyValue('co.cozitos') === true;
 	}
 }
 
@@ -742,7 +756,7 @@ function simpleActivityContextMenuActions(storageService: IStorageService, isAcc
 }
 
 export function isAccountsActionVisible(storageService: IStorageService): boolean {
-	return storageService.getBoolean(AccountsActivityActionViewItem.ACCOUNTS_VISIBILITY_PREFERENCE_KEY, StorageScope.PROFILE, true);
+	return storageService.getBoolean(AccountsActivityActionViewItem.ACCOUNTS_VISIBILITY_PREFERENCE_KEY, StorageScope.PROFILE, false);
 }
 
 function setAccountsActionVisible(storageService: IStorageService, visible: boolean) {

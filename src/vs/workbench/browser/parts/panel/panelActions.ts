@@ -49,7 +49,7 @@ export class TogglePanelAction extends Action2 {
 			metadata: {
 				description: localize('openAndClosePanel', 'Open/Show and Close/Hide Panel'),
 			},
-			keybinding: { primary: KeyMod.CtrlCmd | KeyCode.KeyJ, weight: KeybindingWeight.WorkbenchContrib },
+			keybinding: { primary: KeyMod.CtrlCmd | KeyCode.KeyJ, weight: KeybindingWeight.WorkbenchContrib, when: ContextKeyExpr.notEquals('co.cozitos', true) },
 			menu: [
 				{
 					id: MenuId.MenubarAppearanceMenu,

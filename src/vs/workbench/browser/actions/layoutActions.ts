@@ -301,7 +301,8 @@ export class ToggleSidebarVisibilityAction extends Action2 {
 			f1: true,
 			keybinding: {
 				weight: KeybindingWeight.WorkbenchContrib,
-				primary: KeyMod.CtrlCmd | KeyCode.KeyB
+				primary: KeyMod.CtrlCmd | KeyCode.KeyB,
+				when: ContextKeyExpr.notEquals('co.cozitos', true)
 			},
 			menu: [
 				{

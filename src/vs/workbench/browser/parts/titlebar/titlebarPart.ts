@@ -646,6 +646,7 @@ export class BrowserTitlebarPart extends Part implements ITitlebarPart {
 
 		const updateToolBarActions = () => {
 			const actions: IToolbarActions = { primary: [], secondary: [] };
+			const isCozitos = this.contextKeyService.getContextKeyValue('co.cozitos') === true;
 
 			// --- Editor Actions
 			if (this.editorActionsEnabled) {
@@ -681,7 +682,7 @@ export class BrowserTitlebarPart extends Part implements ITitlebarPart {
 
 			// --- Activity Actions (always at the end)
 			if (this.activityActionsEnabled) {
-				if (isAccountsActionVisible(this.storageService)) {
+				if (!isCozitos && isAccountsActionVisible(this.storageService)) {
 					actions.primary.push(ACCOUNTS_ACTIVITY_TILE_ACTION);
 				}
 

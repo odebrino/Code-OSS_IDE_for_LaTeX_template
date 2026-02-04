@@ -27,6 +27,8 @@ import { IWorkbenchModeService } from '../services/layout/common/workbenchModeSe
 
 export class WorkbenchContextKeysHandler extends Disposable {
 
+	private readonly cozitosContext: IContextKey<boolean>;
+
 	private dirtyWorkingCopiesContext: IContextKey<boolean>;
 
 	private activeEditorGroupEmpty: IContextKey<boolean>;
@@ -82,6 +84,11 @@ export class WorkbenchContextKeysHandler extends Disposable {
 		@IWorkbenchModeService private readonly workbenchModeService: IWorkbenchModeService,
 	) {
 		super();
+
+		// Cozitos mode (env driven)
+		const cozitosEnabled = this.isCozitosEnabled();
+		this.cozitosContext = this.contextKeyService.createKey('co.cozitos', cozitosEnabled);
+		setConstantContextKey('co.cozitos', cozitosEnabled);
 
 		// Platform
 		IsMacContext.bindTo(this.contextKeyService);
@@ -208,6 +215,14 @@ export class WorkbenchContextKeysHandler extends Disposable {
 		this.auxiliaryBarMaximizedContext.set(this.layoutService.isAuxiliaryBarMaximized());
 
 		this.registerListeners();
+	}
+
+	private isCozitosEnabled(): boolean {
+		try {
+			return typeof process !== 'undefined' && process.env?.COZITOS === '1';
+		} catch {
+			return false;
+		}
 	}
 
 	private registerListeners(): void {

@@ -16,7 +16,9 @@
 		"onStartupFinished",
 		"onCommand:coShell.openStudentHome",
 		"onCommand:coShell.openAdminHome",
-		"onCommand:coShell.enterAdminMode"
+		"onCommand:coShell.enterAdminMode",
+		"onCommand:co.diagramador.open",
+		"onView:co.diagramador.blocksView"
 	],
 	"capabilities": {
 		"virtualWorkspaces": true,
@@ -31,20 +33,30 @@
 		"commands": [
 			{ "command": "coShell.openStudentHome", "title": "CO: Open Student Home" },
 			{ "command": "coShell.openAdminHome", "title": "CO: Open Admin Home" },
-			{ "command": "coShell.enterAdminMode", "title": "CO: Enter Admin Mode" }
+			{ "command": "coShell.enterAdminMode", "title": "CO: Enter Admin Mode" },
+			{ "command": "co.diagramador.open", "title": "CO: Abrir Diagramador" }
 		],
 		"menus": {
 			"commandPalette": [
+				{ "command": "co.diagramador.open" },
 				{ "command": "coShell.openAdminHome", "when": "co.role == 'admin'" },
 				{ "command": "coShell.enterAdminMode", "when": "co.role != 'admin'" }
 			]
 		},
 		"viewsContainers": {
 			"activitybar": [
-				{ "id": "coShell", "title": "CO", "icon": "resources/co-view.svg" }
+				{ "id": "coShell", "title": "CO", "icon": "resources/co-view.svg" },
+				{ "id": "diagramador", "title": "Diagramador", "icon": "resources/co-view.svg" }
 			]
 		},
 		"views": {
+			"diagramador": [
+				{
+					"id": "co.diagramador.blocksView",
+					"name": "Editor de Blocos",
+					"type": "webview"
+				}
+			],
 			"coShell": [
 				{
 					"id": "coShell.adminView",

@@ -267,7 +267,10 @@ export const VIEW_CONTAINER: ViewContainer = viewContainerRegistry.registerViewC
 		id: VIEWLET_ID,
 		title: localize2('explore', "Explorer"),
 		mnemonicTitle: localize({ key: 'miViewExplorer', comment: ['&& denotes a mnemonic'] }, "&&Explorer"),
-		keybindings: { primary: KeyMod.CtrlCmd | KeyMod.Shift | KeyCode.KeyE },
+		keybindings: {
+			primary: KeyMod.CtrlCmd | KeyMod.Shift | KeyCode.KeyE,
+			when: ContextKeyExpr.notEquals('co.cozitos', true)
+		},
 		order: 0
 	},
 }, ViewContainerLocation.Sidebar, { isDefault: true });

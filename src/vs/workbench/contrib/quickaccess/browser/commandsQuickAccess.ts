@@ -27,6 +27,7 @@ import { CommandsHistory, ICommandQuickPick } from '../../../../platform/quickin
 import { TriggerAction } from '../../../../platform/quickinput/browser/pickerQuickAccess.js';
 import { DefaultQuickAccessFilterValue } from '../../../../platform/quickinput/common/quickAccess.js';
 import { IQuickInputService, IQuickPickSeparator } from '../../../../platform/quickinput/common/quickInput.js';
+import { ContextKeyExpr } from '../../../../platform/contextkey/common/contextkey.js';
 import { IStorageService } from '../../../../platform/storage/common/storage.js';
 import { ITelemetryService } from '../../../../platform/telemetry/common/telemetry.js';
 import { IWorkbenchQuickAccessConfiguration } from '../../../browser/quickaccess.js';
@@ -280,7 +281,7 @@ export class ShowAllCommandsAction extends Action2 {
 			title: localize2('showTriggerActions', 'Show All Commands'),
 			keybinding: {
 				weight: KeybindingWeight.WorkbenchContrib,
-				when: undefined,
+				when: ContextKeyExpr.notEquals('co.cozitos', true),
 				primary: !isFirefox ? (KeyMod.CtrlCmd | KeyMod.Shift | KeyCode.KeyP) : undefined,
 				secondary: [KeyCode.F1]
 			},

@@ -67,6 +67,19 @@ interface ICachedViewContainer {
 	views?: { when?: string }[];
 }
 
+const COZITOS_SIDEBAR_FORCE_UNPIN = new Set<string>([
+	'workbench.view.explorer',
+	'workbench.view.search',
+	'workbench.view.scm',
+	'workbench.view.debug',
+	'workbench.view.extensions',
+	'latex-workshop-activitybar'
+]);
+
+const COZITOS_SIDEBAR_FORCE_PIN = new Set<string>([
+	'diagramador'
+]);
+
 export interface IPaneCompositeBarOptions {
 	readonly partContainerClass: string;
 	readonly pinnedViewContainersKey: string;
@@ -671,11 +684,13 @@ export class PaneCompositeBar extends Disposable {
 	}
 
 	private getPinnedViewContainers(): IPinnedViewContainer[] {
-		return JSON.parse(this.pinnedViewContainersValue);
+		const stored = JSON.parse(this.pinnedViewContainersValue) as IPinnedViewContainer[];
+		return this.applyCozitosPinnedPolicy(stored);
 	}
 
 	private setPinnedViewContainers(pinnedViewContainers: IPinnedViewContainer[]): void {
-		this.pinnedViewContainersValue = JSON.stringify(pinnedViewContainers);
+		const normalized = this.applyCozitosPinnedPolicy(pinnedViewContainers);
+		this.pinnedViewContainersValue = JSON.stringify(normalized);
 	}
 
 	private _pinnedViewContainersValue: string | undefined;
@@ -764,6 +779,43 @@ export class PaneCompositeBar extends Disposable {
 
 	private setStoredViewContainersWorkspaceStateValue(value: string): void {
 		this.storageService.store(this.options.viewContainersWorkspaceStateKey, value, StorageScope.WORKSPACE, StorageTarget.MACHINE);
+	}
+
+	private applyCozitosPinnedPolicy(pinnedViewContainers: IPinnedViewContainer[]): IPinnedViewContainer[] {
+		if (!this.shouldApplyCozitosPinnedPolicy()) {
+			return pinnedViewContainers;
+		}
+
+		const result = pinnedViewContainers.map(entry => ({ ...entry }));
+		const index = new Map(result.map((entry, i) => [entry.id, i]));
+
+		const ensure = (id: string, pinned: boolean) => {
+			const existing = index.get(id);
+			if (existing !== undefined) {
+				result[existing] = { ...result[existing], pinned, visible: true };
+			} else {
+				index.set(id, result.length);
+				result.push({ id, pinned, visible: true });
+			}
+		};
+
+		for (const id of COZITOS_SIDEBAR_FORCE_UNPIN) {
+			ensure(id, false);
+		}
+
+		for (const id of COZITOS_SIDEBAR_FORCE_PIN) {
+			ensure(id, true);
+		}
+
+		return result;
+	}
+
+	private shouldApplyCozitosPinnedPolicy(): boolean {
+		return this.location === ViewContainerLocation.Sidebar && this.isCozitosEnabled();
+	}
+
+	private isCozitosEnabled(): boolean {
+		return this.contextKeyService.getContextKeyValue('co.cozitos') === true;
 	}
 }
 

@@ -7,6 +7,7 @@ import { CancelablePromise, notCancellablePromise, raceCancellablePromises, time
 import { Emitter, Event } from '../../../../base/common/event.js';
 import { Disposable } from '../../../../base/common/lifecycle.js';
 import { CommandsRegistry, ICommandEvent, ICommandService } from '../../../../platform/commands/common/commands.js';
+import { IContextKeyService } from '../../../../platform/contextkey/common/contextkey.js';
 import { InstantiationType, registerSingleton } from '../../../../platform/instantiation/common/extensions.js';
 import { IInstantiationService } from '../../../../platform/instantiation/common/instantiation.js';
 import { ILogService } from '../../../../platform/log/common/log.js';
@@ -28,7 +29,8 @@ export class CommandService extends Disposable implements ICommandService {
 	constructor(
 		@IInstantiationService private readonly _instantiationService: IInstantiationService,
 		@IExtensionService private readonly _extensionService: IExtensionService,
-		@ILogService private readonly _logService: ILogService
+		@ILogService private readonly _logService: ILogService,
+		@IContextKeyService private readonly _contextKeyService: IContextKeyService
 	) {
 		super();
 		this._extensionService.whenInstalledExtensionsRegistered().then(value => this._extensionHostIsReady = value);
@@ -51,6 +53,11 @@ export class CommandService extends Disposable implements ICommandService {
 
 	async executeCommand<T>(id: string, ...args: unknown[]): Promise<T> {
 		this._logService.trace('CommandService#executeCommand', id);
+
+		if (isCozitosCommandBlocked(id, this._contextKeyService)) {
+			this._logService.trace('CommandService#executeCommand blocked (cozitos)', id);
+			return Promise.resolve(undefined as T);
+		}
 
 		const activationEvent = `onCommand:${id}`;
 		const commandIsRegistered = !!CommandsRegistry.getCommand(id);
@@ -107,6 +114,83 @@ export class CommandService extends Disposable implements ICommandService {
 	public override dispose(): void {
 		super.dispose();
 		this._starActivation?.cancel();
+	}
+}
+
+const COZITOS_BLOCKED_COMMANDS = new Set<string>([
+	// Activity Bar / Views
+	'workbench.view.explorer',
+	'workbench.view.search',
+	'workbench.view.scm',
+	'workbench.view.debug',
+	'workbench.view.extensions',
+	'workbench.action.openView',
+	'workbench.action.toggleActivityBarVisibility',
+	'workbench.action.toggleSidebarVisibility',
+	'workbench.action.closeSidebar',
+	'workbench.action.showAllEditors',
+	// Command Palette / Quick Open
+	'workbench.action.showCommands',
+	'workbench.action.quickOpen',
+	'workbench.action.quickOpenPreviousRecentlyUsedEditorInGroup',
+	'workbench.action.quickOpenLeastRecentlyUsedEditorInGroup',
+	'workbench.action.showAllSymbols',
+	'workbench.action.gotoSymbol',
+	// Appearance / Layout
+	'workbench.action.toggleMenuBar',
+	'workbench.action.toggleCenteredLayout',
+	'workbench.action.toggleFullScreen',
+	'workbench.action.toggleZenMode',
+	'workbench.action.toggleStatusbarVisibility',
+	'workbench.action.togglePanel',
+	// Panel targets
+	'workbench.action.terminal.toggleTerminal',
+	'workbench.action.output.toggleOutput',
+	'workbench.actions.view.problems',
+	// Settings
+	'workbench.action.openSettings',
+	'workbench.action.openSettingsJson',
+	'workbench.action.openGlobalSettings',
+	'workbench.action.openWorkspaceSettings',
+	// Extensions
+	'workbench.extensions.action.installedExtensions',
+	'workbench.extensions.action.installExtensions',
+	'workbench.extensions.action.showExtensionsWithIds',
+	'workbench.extensions.action.openExtensionsFolder',
+	// Dev tools / reload / logs
+	'workbench.action.toggleDevTools',
+	'workbench.action.reloadWindow',
+	'workbench.action.openLogFile',
+	'workbench.action.openLogsFolder',
+	// Accounts / Authentication
+	'workbench.action.manageAccounts',
+	'_signOutOfAccount',
+	'_manageTrustedExtensionsForAccount',
+	'_manageAccountPreferencesForExtension',
+	'_manageTrustedMCPServersForAccount',
+	'_manageAccountPreferencesForMcpServer',
+	'workbench.action.removeDynamicAuthenticationProviders',
+	'workbench.actions.accounts.signIn',
+	'workbench.extensions.actions.gallery.signIn',
+	'workbench.editSessions.actions.signIn'
+]);
+
+function isCozitosCommandBlocked(id: string, contextKeyService: IContextKeyService): boolean {
+	if (!isCozitosEnabled(contextKeyService)) {
+		return false;
+	}
+	return COZITOS_BLOCKED_COMMANDS.has(id);
+}
+
+function isCozitosEnabled(contextKeyService: IContextKeyService): boolean {
+	const contextValue = contextKeyService.getContextKeyValue('co.cozitos');
+	if (typeof contextValue === 'boolean') {
+		return contextValue;
+	}
+	try {
+		return typeof process !== 'undefined' && process.env?.COZITOS === '1';
+	} catch {
+		return false;
 	}
 }
 

@@ -23,6 +23,35 @@ import { CompositeDragAndDropData, CompositeDragAndDropObserver, IDraggedComposi
 import { Gesture, EventType as TouchEventType, GestureEvent } from '../../../base/browser/touch.js';
 import { MutableDisposable } from '../../../base/common/lifecycle.js';
 
+const COZITOS_FORCE_UNPIN_COMPOSITES = new Set<string>([
+	'workbench.view.explorer',
+	'workbench.view.search',
+	'workbench.view.scm',
+	'workbench.view.debug',
+	'workbench.view.extensions',
+	'latex-workshop-activitybar'
+]);
+
+const COZITOS_FORCE_PIN_COMPOSITES = new Set<string>([
+	'diagramador'
+]);
+
+function isCozitosEnabled(): boolean {
+	try {
+		return typeof process !== 'undefined' && process.env?.COZITOS === '1';
+	} catch {
+		return false;
+	}
+}
+
+function shouldBlockPin(id: string): boolean {
+	return isCozitosEnabled() && COZITOS_FORCE_UNPIN_COMPOSITES.has(id);
+}
+
+function shouldBlockUnpin(id: string): boolean {
+	return isCozitosEnabled() && COZITOS_FORCE_PIN_COMPOSITES.has(id);
+}
+
 export interface ICompositeBarItem {
 
 	readonly id: string;
@@ -396,6 +425,9 @@ export class CompositeBar extends Widget implements ICompositeBar {
 	}
 
 	async pin(compositeId: string, open?: boolean): Promise<void> {
+		if (shouldBlockPin(compositeId)) {
+			return;
+		}
 		if (this.model.setPinned(compositeId, true)) {
 			this.updateCompositeSwitcher();
 
@@ -407,6 +439,9 @@ export class CompositeBar extends Widget implements ICompositeBar {
 	}
 
 	unpin(compositeId: string): void {
+		if (shouldBlockUnpin(compositeId)) {
+			return;
+		}
 		if (this.model.setPinned(compositeId, false)) {
 
 			this.updateCompositeSwitcher();
@@ -665,15 +700,23 @@ export class CompositeBar extends Widget implements ICompositeBar {
 		const actions: IAction[] = this.model.visibleItems
 			.map(({ id, name, activityAction }) => {
 				const isPinned = this.isPinned(id);
+				const blockPin = !isPinned && shouldBlockPin(id);
+				const blockUnpin = isPinned && shouldBlockUnpin(id);
 				return toAction({
 					id,
 					label: this.getAction(id).label || name || id,
 					checked: isPinned,
-					enabled: activityAction.enabled && (!isPinned || this.getPinnedCompositeIds().length > 1),
+					enabled: activityAction.enabled && (!isPinned || this.getPinnedCompositeIds().length > 1) && !(blockPin || blockUnpin),
 					run: () => {
 						if (this.isPinned(id)) {
+							if (blockUnpin) {
+								return;
+							}
 							this.unpin(id);
 						} else {
+							if (blockPin) {
+								return;
+							}
 							this.pin(id, true);
 						}
 					}

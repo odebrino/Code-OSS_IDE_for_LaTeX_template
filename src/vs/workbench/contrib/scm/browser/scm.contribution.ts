@@ -135,6 +135,7 @@ viewsRegistry.registerViews([{
 			win: { primary: KeyMod.CtrlCmd | KeyMod.Shift | KeyCode.KeyG },
 			linux: { primary: KeyMod.CtrlCmd | KeyMod.Shift | KeyCode.KeyG },
 			mac: { primary: KeyMod.WinCtrl | KeyMod.Shift | KeyCode.KeyG },
+			when: ContextKeyExpr.notEquals('co.cozitos', true)
 		},
 		order: 2,
 	}
