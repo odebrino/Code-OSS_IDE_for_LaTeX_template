@@ -1,0 +1,70 @@
+{
+	"name": "co-shell",
+	"displayName": "CO Shell",
+	"description": "Student/Admin shell UI for CO Dev",
+	"publisher": "odebrino",
+	"version": "0.0.1",
+	"license": "MIT",
+	"engines": {
+		"vscode": "^1.90.0"
+	},
+	"categories": [
+		"Other"
+	],
+	"main": "./out/extension.js",
+	"activationEvents": [
+		"onStartupFinished",
+		"onCommand:coShell.openStudentHome",
+		"onCommand:coShell.openAdminHome",
+		"onCommand:coShell.enterAdminMode"
+	],
+	"capabilities": {
+		"virtualWorkspaces": true,
+		"untrustedWorkspaces": {
+			"supported": true
+		}
+	},
+	"contributes": {
+		"commands": [
+			{ "command": "coShell.openStudentHome", "title": "CO: Open Student Home" },
+			{ "command": "coShell.openAdminHome", "title": "CO: Open Admin Home" },
+			{ "command": "coShell.enterAdminMode", "title": "CO: Enter Admin Mode" }
+		],
+		"menus": {
+			"commandPalette": [
+				{ "command": "coShell.openAdminHome", "when": "co.role == 'admin'" },
+				{ "command": "coShell.enterAdminMode", "when": "co.role != 'admin'" }
+			]
+		},
+		"viewsContainers": {
+			"activitybar": [
+				{ "id": "coShell", "title": "CO", "icon": "resources/co-view.svg" }
+			]
+		},
+		"views": {
+			"coShell": [
+				{
+					"id": "coShell.adminView",
+					"name": "Admin Home",
+					"type": "webview",
+					"when": "co.role == 'admin'"
+				}
+			]
+		},
+		"configuration": {
+			"title": "CO Shell",
+			"properties": {
+				"coShell.userEmail": {
+					"type": "string",
+					"default": "",
+					"description": "Email usado para decidir admin via admins.json"
+				},
+				"coShell.adminsFile": {
+					"type": "string",
+					"default": "",
+					"description": "Caminho opcional para admins.json"
+				}
+			}
+		}
+	}
+}
