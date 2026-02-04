@@ -292,6 +292,7 @@ export function fromVsix(vsixPath: string, { name: extensionName, version, sha25
 			return f;
 		}))
 		.pipe(vzip.src())
+		.pipe(buffer())
 		.pipe(filter('extension/**'))
 		.pipe(rename(p => p.dirname = p.dirname!.replace(/^extension\/?/, '')))
 		.pipe(packageJsonFilter)

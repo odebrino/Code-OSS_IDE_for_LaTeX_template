@@ -16,6 +16,9 @@ type GeneratePayload = {
 	turma?: string;
 	titulo?: string;
 	disciplina?: string;
+	professor?: string;
+	data?: string;
+	observacoes?: string;
 };
 
 const ROLE_KEY = 'co.role';
@@ -238,22 +241,34 @@ function renderTex(payload: GeneratePayload) {
 	const turma = escapeLatex(payload.turma || 'Turma');
 	const titulo = escapeLatex(payload.titulo || 'Atividade');
 	const disciplina = escapeLatex(payload.disciplina || 'Disciplina');
+	const professor = escapeLatex(payload.professor || '');
+	const data = escapeLatex(payload.data || '');
+	const observacoes = escapeLatexBlock(payload.observacoes || '');
 
 	return [
 		'\\documentclass[12pt]{article}',
 		'\\usepackage[utf8]{inputenc}',
 		'\\usepackage{geometry}',
 		'\\usepackage{lmodern}',
+		'\\usepackage{parskip}',
 		'\\geometry{a4paper, margin=2.5cm}',
 		'\\begin{document}',
 		'\\begin{center}',
 		`{\\Large ${titulo}}\\\\`,
-		'\\vspace{0.5cm}',
-		`${disciplina}\\\\`,
-		`${nome} - ${turma}`,
+		'\\vspace{0.3cm}',
+		`${disciplina}`,
 		'\\end{center}',
-		'\\vspace{1cm}',
-		'Texto gerado pelo CO Dev.',
+		'\\vspace{0.6cm}',
+		'\\begin{tabular}{ll}',
+		`Nome: & ${nome} \\\\`,
+		`Turma: & ${turma} \\\\`,
+		`Professor: & ${professor || '-'} \\\\`,
+		`Data: & ${data || '-'} \\\\`,
+		'\\end{tabular}',
+		'\\vspace{0.8cm}',
+		'\\textbf{Observacoes}',
+		'\\vspace{0.2cm}',
+		observacoes || '-',
 		'\\end{document}'
 	].join('\n');
 }
@@ -272,6 +287,11 @@ function escapeLatex(value: string) {
 		'~': '\\\\textasciitilde{}'
 	};
 	return value.replace(/[\\{}%$#&_~^]/g, match => map[match]);
+}
+
+function escapeLatexBlock(value: string) {
+	const escaped = escapeLatex(value);
+	return escaped.replace(/\r?\n/g, '\\\\');
 }
 
 async function runLatex(texPath: string, outDir: string) {

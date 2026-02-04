@@ -82,6 +82,14 @@ const compilations = [
 
 const getBaseUrl = (out: string) => `https://main.vscode-cdn.net/sourcemaps/${commit}/${out}`;
 
+function streamToPromise(stream: NodeJS.ReadWriteStream): Promise<void> {
+	return new Promise((resolve, reject) => {
+		stream.on('error', reject);
+		stream.on('end', resolve);
+		stream.on('finish', resolve);
+	});
+}
+
 function rewriteTsgoSourceMappingUrlsIfNeeded(build: boolean, out: string, baseUrl: string): Promise<void> {
 	if (!build) {
 		return Promise.resolve();
@@ -224,7 +232,11 @@ export const cleanExtensionsBuildTask = task.define('clean-extensions-build', ut
 /**
  * brings in the marketplace extensions for the build
  */
-const bundleMarketplaceExtensionsBuildTask = task.define('bundle-marketplace-extensions-build', () => ext.packageMarketplaceExtensionsStream(false).pipe(gulp.dest('.build')));
+const bundleMarketplaceExtensionsBuildTask = task.define('bundle-marketplace-extensions-build', () => {
+	const source = ext.packageMarketplaceExtensionsStream(false);
+	source.pipe(gulp.dest('.build'));
+	return streamToPromise(source as NodeJS.ReadWriteStream);
+});
 
 /**
  * Compiles the non-native extensions for the build

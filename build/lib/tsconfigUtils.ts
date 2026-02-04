@@ -19,6 +19,11 @@ export function getTargetStringFromTsConfig(configFilePath: string): string {
 	if (!resolved) {
 		throw new Error(`Could not resolve target in ${configFilePath}`);
 	}
+	if (resolved === 'LatestStandard') {
+		return 'ES2024';
+	}
+	if (resolved === 'Latest') {
+		return 'ESNext';
+	}
 	return resolved;
 }
-

@@ -105,15 +105,26 @@ function getHomeHtml(webview: vscode.Webview, role: Role): string {
 		padding: 12px;
 	}
 	label { display: block; margin: 8px 0 4px; }
-	input, button {
+	input, button, textarea {
 		width: 100%;
 		padding: 8px;
 		border-radius: 6px;
 		border: 1px solid #ccc;
 		box-sizing: border-box;
 	}
+	textarea {
+		min-height: 90px;
+		resize: vertical;
+	}
 	button { background: #2d7ef7; color: #fff; border: none; cursor: pointer; }
 	button:disabled { background: #9bbcf2; }
+	.form-actions {
+		display: flex;
+		gap: 8px;
+		margin-top: 8px;
+	}
+	.form-actions button { width: auto; flex: 1; }
+	.hint { font-size: 12px; color: #666; margin-top: 6px; }
 	#preview {
 		width: 100%;
 		height: calc(100% - 32px);
@@ -121,9 +132,28 @@ function getHomeHtml(webview: vscode.Webview, role: Role): string {
 		border-radius: 8px;
 		background: #fff;
 	}
+	#previewEmpty {
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		color: #777;
+		height: calc(100% - 32px);
+		border: 1px dashed #ccc;
+		border-radius: 8px;
+		background: #fafafa;
+	}
 	#status { margin-top: 8px; font-size: 12px; color: #444; }
 	#details { margin-top: 8px; font-size: 12px; color: #a33; white-space: pre-wrap; }
 	[data-role="student"] #adminExtras { display: none; }
+	@media (max-width: 900px) {
+		.container {
+			grid-template-columns: 1fr;
+			height: auto;
+		}
+		#preview, #previewEmpty {
+			height: 60vh;
+		}
+	}
 </style>
 </head>
 <body data-role="${role}">
@@ -140,10 +170,23 @@ function getHomeHtml(webview: vscode.Webview, role: Role): string {
 				<label>Disciplina</label>
 				<input id="disciplina" type="text" placeholder="Ex: Matematica" />
 
+				<label>Professor</label>
+				<input id="professor" type="text" placeholder="Ex: Maria" />
+
+				<label>Data</label>
+				<input id="data" type="date" />
+
 				<label>Titulo</label>
 				<input id="titulo" type="text" placeholder="Ex: Atividade 1" />
 
-				<button id="btn" type="submit">Gerar PDF</button>
+				<label>Observacoes</label>
+				<textarea id="observacoes" placeholder="Escreva observacoes ou instrucoes..."></textarea>
+
+				<div class="form-actions">
+					<button id="btn" type="submit">Gerar PDF</button>
+					<button id="clear" type="button">Limpar</button>
+				</div>
+				<div class="hint">Arquivos sao salvos localmente no armazenamento do CO Dev.</div>
 				<div id="status"></div>
 				<pre id="details"></pre>
 
@@ -156,6 +199,7 @@ function getHomeHtml(webview: vscode.Webview, role: Role): string {
 		</div>
 
 		<div class="card">
+			<div id="previewEmpty">Nenhum PDF gerado ainda.</div>
 			<iframe id="preview" title="Preview PDF"></iframe>
 		</div>
 	</div>
@@ -164,9 +208,11 @@ function getHomeHtml(webview: vscode.Webview, role: Role): string {
 	const vscode = acquireVsCodeApi();
 	const form = document.getElementById('form');
 	const btn = document.getElementById('btn');
+	const clear = document.getElementById('clear');
 	const statusEl = document.getElementById('status');
 	const detailsEl = document.getElementById('details');
 	const preview = document.getElementById('preview');
+	const previewEmpty = document.getElementById('previewEmpty');
 	const role = document.body.dataset.role;
 
 	form.addEventListener('submit', (event) => {
@@ -178,9 +224,21 @@ function getHomeHtml(webview: vscode.Webview, role: Role): string {
 			nome: document.getElementById('nome').value,
 			turma: document.getElementById('turma').value,
 			disciplina: document.getElementById('disciplina').value,
-			titulo: document.getElementById('titulo').value
+			professor: document.getElementById('professor').value,
+			data: document.getElementById('data').value,
+			titulo: document.getElementById('titulo').value,
+			observacoes: document.getElementById('observacoes').value
 		};
 		vscode.postMessage({ type: 'generatePdf', payload });
+	});
+
+	clear.addEventListener('click', () => {
+		form.reset();
+		statusEl.textContent = '';
+		detailsEl.textContent = '';
+		preview.src = '';
+		preview.style.display = 'none';
+		previewEmpty.style.display = 'flex';
 	});
 
 	document.getElementById('openLog').addEventListener('click', () => {
@@ -195,17 +253,23 @@ function getHomeHtml(webview: vscode.Webview, role: Role): string {
 		const msg = event.data;
 		if (msg.type === 'pdfReady') {
 			statusEl.textContent = 'PDF gerado.';
+			previewEmpty.style.display = 'none';
+			preview.style.display = 'block';
 			preview.src = msg.pdfUri + '#toolbar=0&navpanes=0';
 			btn.disabled = false;
 		}
 		if (msg.type === 'error') {
 			statusEl.textContent = msg.friendly || 'Erro.';
+			preview.style.display = 'none';
+			previewEmpty.style.display = 'flex';
 			if (role === 'admin' && msg.detail) {
 				detailsEl.textContent = msg.detail;
 			}
 			btn.disabled = false;
 		}
 	});
+
+	preview.style.display = 'none';
 </script>
 </body>
 </html>`;
