@@ -47,6 +47,28 @@ const DEFAULT_PREVIEW = {
 	members: ['Integrante 1', 'Integrante 2']
 };
 
+const MODEL_TEMPLATES = [
+	{
+		id: 'tarefa',
+		name: 'Tarefa',
+		description: 'Modelo de tarefa',
+		mainTex: DEFAULT_TEMPLATE_SOURCE,
+		schema: DEFAULT_SCHEMA,
+		previewData: { title: 'Tarefa', members: ['Integrante 1', 'Integrante 2'] }
+	},
+	{
+		id: 'oficio',
+		name: 'Oficio',
+		description: 'Modelo de oficio',
+		mainTex: DEFAULT_TEMPLATE_SOURCE,
+		schema: DEFAULT_SCHEMA,
+		previewData: { title: 'Oficio', members: ['Integrante 1', 'Integrante 2'] }
+	}
+];
+
+const MODEL_TEMPLATE_IDS = new Set(MODEL_TEMPLATES.map(template => template.id));
+const DEFAULT_MODEL_ID = 'tarefa';
+
 export async function activate(context: vscode.ExtensionContext) {
 	if (isCozitosEnabled()) {
 		const output = vscode.window.createOutputChannel('Gerador de Template');
@@ -115,9 +137,10 @@ class TemplateGeneratorController implements vscode.Disposable {
 
 	async initialize() {
 		await this.resolveBundlePath();
+		await this.ensureModelTemplates();
 		await this.refreshTemplates();
-		if (!this.currentTemplate && this.templates.length) {
-			await this.selectTemplate(this.templates[0].id, { silent: true, skipBuild: true });
+		if (!this.currentTemplate) {
+			await this.selectTemplate(DEFAULT_MODEL_ID, { silent: true, skipBuild: true });
 		}
 		this.initialized = true;
 		this.viewProvider?.sendState(this.getState());
@@ -198,21 +221,61 @@ class TemplateGeneratorController implements vscode.Disposable {
 	}
 
 	private async refreshTemplates() {
-		this.templates = await listTemplates(this.templateStorage);
+		const allTemplates = await listTemplates(this.templateStorage);
+		this.templates = allTemplates.filter(template => MODEL_TEMPLATE_IDS.has(template.id));
 		if (this.currentTemplate && !this.templates.some(entry => entry.id === this.currentTemplate?.manifest.id)) {
 			this.currentTemplate = undefined;
 		}
-		if (!this.currentTemplate && this.templates.length) {
-			this.currentTemplate = await loadTemplate(this.templateStorage, this.templates[0].id);
+		if (!this.currentTemplate) {
+			const preferred = this.templates.find(template => template.id === DEFAULT_MODEL_ID);
+			const fallback = preferred ?? this.templates[0];
+			if (fallback) {
+				this.currentTemplate = await loadTemplate(this.templateStorage, fallback.id);
+			}
 		}
 		this.viewProvider?.sendState(this.getState());
+	}
+
+	private async ensureModelTemplates() {
+		for (const model of MODEL_TEMPLATES) {
+			await this.ensureModelTemplate(model.id);
+		}
+	}
+
+	private async ensureModelTemplate(id: string) {
+		const model = MODEL_TEMPLATES.find(template => template.id === id);
+		if (!model) {
+			return;
+		}
+		if (await this.templateExists(model.id)) {
+			return;
+		}
+		const manifest: TemplateManifest = {
+			id: model.id,
+			name: model.name,
+			version: '1.0.0',
+			description: model.description,
+			entry: 'main.tex',
+			schema: model.schema.map(field => ({ ...field })),
+			defaults: cloneData(model.previewData)
+		};
+		await saveTemplate(this.templateStorage, {
+			manifest,
+			mainTex: model.mainTex,
+			previewData: cloneData(model.previewData)
+		});
 	}
 
 	private async selectTemplate(id: string, options?: { silent?: boolean; skipBuild?: boolean }) {
 		if (!id || typeof id !== 'string') {
 			return;
 		}
-		const template = await loadTemplate(this.templateStorage, id);
+		const templateId = id.trim();
+		if (!templateId || !MODEL_TEMPLATE_IDS.has(templateId)) {
+			return;
+		}
+		await this.ensureModelTemplate(templateId);
+		const template = await loadTemplate(this.templateStorage, templateId);
 		if (!template) {
 			return;
 		}
