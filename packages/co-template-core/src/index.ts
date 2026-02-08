@@ -622,7 +622,7 @@ async function runTectonic(
 			args.push('--bundle', bundle);
 		}
 		if (options?.fast) {
-			args.push('--reruns', '0', '--pass', 'tex', '--chatter', 'minimal');
+			args.push('--reruns', '0', '--chatter', 'minimal');
 		}
 		args.push('--outdir', outDir, texPath);
 		const child = spawn(cmd, args, { cwd: outDir, shell: process.platform === 'win32' });
