@@ -77,10 +77,12 @@ export type TemplateBuildRequest = {
 	template: TemplatePackage;
 	previewData: Record<string, any>;
 	outDir: string;
+	fast?: boolean;
 };
 
 export type BuildPreviewOptions = {
 	onProcess?: (child: ChildProcess) => void;
+	fast?: boolean;
 };
 
 const DEFAULT_SHARED_STORAGE = 'co-template-core';
@@ -262,7 +264,7 @@ export async function buildPreview(
 			texPath
 		};
 	}
-	const result = await runTectonic(texPath, outDir, options?.onProcess);
+	const result = await runTectonic(texPath, outDir, options?.onProcess, options);
 	await writeBuildLog(logPath, result);
 	return {
 		...result,
@@ -335,7 +337,8 @@ export class TemplateBuildService {
 			const result = await buildPreview(request.template, request.previewData, request.outDir, {
 				onProcess: (child) => {
 					this.currentProcess = child;
-				}
+				},
+				fast: request.fast
 			});
 			if (buildId !== this.buildId) {
 				return;
@@ -616,18 +619,22 @@ async function writeBuildLog(logPath: string, result: { ok: boolean; stdout: str
 async function runTectonic(
 	texPath: string,
 	outDir: string,
-	onProcess?: (child: ChildProcess) => void
+	onProcess?: (child: ChildProcess) => void,
+	options?: { fast?: boolean }
 ): Promise<{ ok: boolean; stdout: string; stderr: string; friendly: string; notFound: boolean }> {
 	return new Promise(resolve => {
 		let stdout = '';
 		let stderr = '';
 		const cmd = process.env.TECTONIC_PATH || 'tectonic';
-		const args = ['--outdir', outDir, texPath];
+		const args: string[] = [];
 		const bundle = process.env.CO_TECTONIC_BUNDLE;
 		if (bundle) {
-			args.unshift(bundle);
-			args.unshift('--bundle');
+			args.push('--bundle', bundle);
 		}
+		if (options?.fast) {
+			args.push('--reruns', '0', '--pass', 'tex', '--chatter', 'minimal');
+		}
+		args.push('--outdir', outDir, texPath);
 		const child = spawn(cmd, args, { cwd: outDir, shell: process.platform === 'win32' });
 		onProcess?.(child);
 		child.stdout.on('data', (data: Buffer) => { stdout += data.toString(); });

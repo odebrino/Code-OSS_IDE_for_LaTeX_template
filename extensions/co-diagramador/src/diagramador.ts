@@ -48,17 +48,9 @@ export const TEMPLATE_TEST_V0 = String.raw`\documentclass[12pt]{article}
 \ifPDFTeX
 \usepackage[T1]{fontenc}
 \usepackage[utf8]{inputenc}
-% fallback (pdfLaTeX): nao e Comic Sans real
-\newcommand{\comic}{\sffamily}
-\else
-\usepackage{fontspec}
-% XeLaTeX/LuaLaTeX: se tiver Comic Sans MS instalada (ou se voce subir a .ttf), usa ela
-\IfFontExistsTF{Comic Sans MS}
-{\newfontfamily\comicfont{Comic Sans MS}\newcommand{\comic}{\comicfont}}
-{\IfFontExistsTF{Latin Modern Sans}
-{\newfontfamily\comicfont{Latin Modern Sans}\newcommand{\comic}{\comicfont}}
-{\newcommand{\comic}{\sffamily}}}
 \fi
+\usepackage{lmodern}
+\newcommand{\comic}{\sffamily}
 
 % ========= Variaveis =========
 \newcommand{\HeaderImage}{assets/modelo_header_image1.jpg}

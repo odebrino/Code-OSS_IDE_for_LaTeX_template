@@ -381,7 +381,8 @@ class TemplateGeneratorController implements vscode.Disposable {
 		this.buildService.schedule({
 			template: this.currentTemplate,
 			previewData: this.currentTemplate.previewData ?? {},
-			outDir
+			outDir,
+			fast: true
 		});
 	}
 
@@ -393,7 +394,8 @@ class TemplateGeneratorController implements vscode.Disposable {
 		this.buildService.buildNow({
 			template: this.currentTemplate,
 			previewData: this.currentTemplate.previewData ?? {},
-			outDir
+			outDir,
+			fast: false
 		});
 	}
 

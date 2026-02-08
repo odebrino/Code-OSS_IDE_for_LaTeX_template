@@ -69,6 +69,17 @@ type PdfJsPaths = {
 	standardFontsDir: string;
 };
 
+const FONT_BLOCK_PATTERN = /% ========= Fonte[\s\S]*?% ========= Variaveis =========/;
+const OPTIMIZED_FONT_BLOCK = String.raw`% ========= Fonte (depois do titulo) =========
+\ifPDFTeX
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\fi
+\usepackage{lmodern}
+\newcommand{\comic}{\sffamily}
+
+% ========= Variaveis =========`;
+
 class DiagramadorController implements vscode.Disposable {
 	private static readonly AUTO_COMPILE_KEY = 'co.diagramador.autoCompile';
 	private project: DiagramadorProject = createDefaultProject();
@@ -247,7 +258,8 @@ class DiagramadorController implements vscode.Disposable {
 		this.buildService.schedule({
 			template,
 			previewData,
-			outDir: this.paths.outDir
+			outDir: this.paths.outDir,
+			fast: true
 		});
 	}
 
@@ -261,7 +273,8 @@ class DiagramadorController implements vscode.Disposable {
 		this.buildService.buildNow({
 			template,
 			previewData,
-			outDir: this.paths.outDir
+			outDir: this.paths.outDir,
+			fast: false
 		});
 	}
 
@@ -302,6 +315,7 @@ class DiagramadorController implements vscode.Disposable {
 		const existing = await loadTemplate(this.templateStorage, DEFAULT_TEMPLATE_ID);
 		if (existing) {
 			await this.ensureHeaderImage(existing);
+			await this.ensureOptimizedFontBlock(existing);
 			return;
 		}
 		const defaults = {
@@ -349,6 +363,25 @@ class DiagramadorController implements vscode.Disposable {
 			await fs.copyFile(this.headerImagePath, path.join(template.assetsDir, this.headerImageName));
 		} catch (err: any) {
 			this.output.appendLine(`[${new Date().toISOString()}] Falha ao criar template padrao: ${err?.message ?? err}`);
+		}
+	}
+
+	private async ensureOptimizedFontBlock(template: TemplatePackage) {
+		if (template.readOnly || template.manifest.id !== DEFAULT_TEMPLATE_ID) {
+			return;
+		}
+		if (!template.mainTex.includes('\\usepackage{fontspec}') && !template.mainTex.includes('Comic Sans MS')) {
+			return;
+		}
+		const updated = template.mainTex.replace(FONT_BLOCK_PATTERN, OPTIMIZED_FONT_BLOCK);
+		if (updated === template.mainTex) {
+			return;
+		}
+		try {
+			await fs.writeFile(template.entryPath, updated, 'utf8');
+			template.mainTex = updated;
+		} catch (err: any) {
+			this.output.appendLine(`[${new Date().toISOString()}] Falha ao otimizar fonte: ${err?.message ?? err}`);
 		}
 	}
 
