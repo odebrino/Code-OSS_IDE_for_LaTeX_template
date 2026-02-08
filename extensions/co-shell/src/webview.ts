@@ -56,15 +56,28 @@ export type DiagramadorStatus = {
 	message?: string;
 };
 
+export type DiagramadorTemplateSummary = {
+	id: string;
+	name: string;
+	version?: string;
+	description?: string;
+};
+
 export class DiagramadorViewProvider implements vscode.WebviewViewProvider {
 	private view?: vscode.WebviewView;
+	private readonly uiBuildId: string;
+	private lastHtmlBuildId?: string;
+	private templates: DiagramadorTemplateSummary[] = [];
 
 	constructor(
 		private readonly context: vscode.ExtensionContext,
 		private readonly onMessage: MessageHandler,
 		private readonly getProject: () => DiagramadorProject,
+		uiBuildId: string,
 		private readonly onVisible?: () => void
-	) { }
+	) {
+		this.uiBuildId = uiBuildId;
+	}
 
 	resolveWebviewView(view: vscode.WebviewView): void {
 		this.view = view;
@@ -72,10 +85,11 @@ export class DiagramadorViewProvider implements vscode.WebviewViewProvider {
 			enableScripts: true,
 			localResourceRoots: [this.context.extensionUri]
 		};
-		view.webview.html = getDiagramadorHtml(view.webview, this.getProject());
+		this.refreshWebview(true);
 		view.webview.onDidReceiveMessage(message => this.onMessage(message, view.webview));
 		view.onDidChangeVisibility(() => {
 			if (view.visible) {
+				this.refreshWebview(true);
 				this.onVisible?.();
 			}
 		});
@@ -85,12 +99,29 @@ export class DiagramadorViewProvider implements vscode.WebviewViewProvider {
 		this.view?.webview.postMessage({ type: 'project', project });
 	}
 
+	sendTemplates(templates: DiagramadorTemplateSummary[]) {
+		this.templates = templates;
+		this.view?.webview.postMessage({ type: 'templates', templates });
+	}
+
 	sendStatus(status: DiagramadorStatus) {
 		this.view?.webview.postMessage({ type: 'status', status });
 	}
 
 	show(preserveFocus = true) {
+		this.refreshWebview(true);
 		this.view?.show(preserveFocus);
+	}
+
+	private refreshWebview(force = false) {
+		if (!this.view) {
+			return;
+		}
+		if (!force && this.lastHtmlBuildId === this.uiBuildId) {
+			return;
+		}
+		this.view.webview.html = getDiagramadorHtml(this.view.webview, this.getProject(), this.templates, this.uiBuildId);
+		this.lastHtmlBuildId = this.uiBuildId;
 	}
 }
 
@@ -100,11 +131,19 @@ export function registerDiagramadorView(
 	getProject: () => DiagramadorProject,
 	onVisible?: () => void
 ) {
-	const provider = new DiagramadorViewProvider(context, onMessage, getProject, onVisible);
+	const provider = new DiagramadorViewProvider(context, onMessage, getProject, getUiBuildId(context), onVisible);
 	context.subscriptions.push(
 		vscode.window.registerWebviewViewProvider('co.diagramador.blocksView', provider)
 	);
 	return provider;
+}
+
+function getUiBuildId(context: vscode.ExtensionContext): string {
+	const version = String(context.extension?.packageJSON?.version ?? '0.0.0');
+	if (context.extensionMode === vscode.ExtensionMode.Development) {
+		return `${version} / ${new Date().toISOString()}`;
+	}
+	return version;
 }
 
 class AdminHomeViewProvider implements vscode.WebviewViewProvider {
@@ -332,7 +371,12 @@ function getHomeHtml(webview: vscode.Webview, role: Role): string {
 </html>`;
 }
 
-function getDiagramadorHtml(webview: vscode.Webview, project: DiagramadorProject): string {
+function getDiagramadorHtml(
+	webview: vscode.Webview,
+	project: DiagramadorProject,
+	templates: DiagramadorTemplateSummary[],
+	uiBuildId: string
+): string {
 	const nonce = getNonce();
 	const csp = [
 		"default-src 'none'",
@@ -341,6 +385,8 @@ function getDiagramadorHtml(webview: vscode.Webview, project: DiagramadorProject
 		`script-src 'nonce-${nonce}'`
 	].join('; ');
 	const projectJson = JSON.stringify(project).replace(/</g, '\\u003c');
+	const templatesJson = JSON.stringify(templates).replace(/</g, '\\u003c');
+	const safeBuildId = escapeHtml(uiBuildId);
 
 	return `<!DOCTYPE html>
 <html lang="pt-br">
@@ -357,10 +403,7 @@ function getDiagramadorHtml(webview: vscode.Webview, project: DiagramadorProject
 		color: var(--vscode-foreground, #222);
 		background: var(--vscode-sideBar-background, #f7f7f7);
 	}
-	h2 {
-		margin: 0 0 8px 0;
-		font-size: 14px;
-	}
+	h2 { margin: 0 0 8px 0; font-size: 14px; }
 	.card {
 		background: var(--vscode-editor-background, #fff);
 		border: 1px solid var(--vscode-panel-border, #ddd);
@@ -368,15 +411,28 @@ function getDiagramadorHtml(webview: vscode.Webview, project: DiagramadorProject
 		padding: 10px;
 		margin-bottom: 10px;
 	}
-	.status {
+	.topline {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 8px;
+		flex-wrap: wrap;
+		margin-bottom: 10px;
+	}
+	.template-title {
 		font-size: 12px;
-		color: var(--vscode-foreground, #444);
+		font-weight: 600;
+	}
+	.ui-build {
+		font-size: 10px;
+		color: #666;
 		margin-bottom: 8px;
 	}
+	.status { font-size: 12px; color: var(--vscode-foreground, #444); }
 	.status[data-state="error"] { color: #a33; }
 	.status[data-state="success"] { color: #2d7ef7; }
 	label { display: block; font-size: 12px; margin: 6px 0 4px; }
-	input, textarea, select, button {
+	input, textarea, select {
 		width: 100%;
 		box-sizing: border-box;
 		padding: 6px 8px;
@@ -386,165 +442,160 @@ function getDiagramadorHtml(webview: vscode.Webview, project: DiagramadorProject
 		color: inherit;
 		font-size: 12px;
 	}
-	textarea { resize: vertical; min-height: 60px; }
+	textarea { resize: vertical; min-height: 140px; }
 	button {
+		width: auto;
 		background: #2d7ef7;
 		color: #fff;
 		border: none;
 		cursor: pointer;
+		padding: 6px 10px;
+		border-radius: 6px;
+		font-size: 12px;
 	}
 	button.secondary { background: #5c6b7a; }
 	button:disabled { opacity: 0.5; cursor: not-allowed; }
-	.row {
-		display: grid;
-		grid-template-columns: 1fr 1fr;
-		gap: 8px;
-	}
-	.blocks-header {
-		display: grid;
-		grid-template-columns: 1fr auto;
-		gap: 6px;
-		margin-bottom: 8px;
-	}
-	.block-item {
-		display: flex;
-		justify-content: space-between;
-		gap: 8px;
-		align-items: center;
-		width: 100%;
-		background: transparent;
-		color: inherit;
-		border: 1px solid transparent;
-		padding: 6px 8px;
-		border-radius: 6px;
-		cursor: pointer;
-		text-align: left;
-	}
-	.block-item.selected {
-		border-color: #2d7ef7;
-		background: rgba(45, 126, 247, 0.12);
-	}
-	.block-tag {
-		font-size: 10px;
-		text-transform: uppercase;
-		letter-spacing: 0.04em;
-		color: #555;
-	}
-	.block-summary {
-		flex: 1;
-		font-size: 12px;
-		color: inherit;
-		text-align: right;
-	}
-	.actions {
-		display: grid;
-		grid-template-columns: repeat(2, 1fr);
-		gap: 6px;
-		margin-top: 8px;
-	}
 	.empty {
 		font-size: 12px;
 		color: #666;
-		padding: 8px 0;
+		padding: 6px 0;
+	}
+	.hint {
+		font-size: 11px;
+		color: #666;
+		margin-top: 6px;
+	}
+	.section {
+		margin-top: 12px;
+	}
+	.section-header {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 8px;
+		margin-bottom: 6px;
+		font-size: 12px;
+		font-weight: 600;
+	}
+	.member-row {
+		display: grid;
+		grid-template-columns: 1fr auto;
+		gap: 6px;
+		margin-bottom: 6px;
+	}
+	.chips {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 6px;
+		margin-bottom: 6px;
+	}
+	.chip {
+		display: inline-flex;
+		align-items: center;
+		gap: 6px;
+		padding: 4px 8px;
+		border-radius: 999px;
+		border: 1px solid rgba(45, 126, 247, 0.35);
+		background: rgba(45, 126, 247, 0.12);
+		font-size: 11px;
+	}
+	.chip button {
+		background: transparent;
+		color: inherit;
+		padding: 0 4px;
+		border-radius: 999px;
 	}
 </style>
 </head>
 <body>
-	<div class="status" id="status" data-state="idle"></div>
+	<div class="topline">
+		<div class="template-title" id="templateTitle"></div>
+		<div class="status" id="status" data-state="idle"></div>
+	</div>
+	<div class="ui-build">UI_BUILD: ${safeBuildId}</div>
 
 	<section class="card">
-		<h2>Cabecalho</h2>
-		<div class="row">
-			<div>
-				<label for="header-name">Nome</label>
-				<input id="header-name" type="text" />
-			</div>
-			<div>
-				<label for="header-turma">Turma</label>
-				<input id="header-turma" type="text" />
-			</div>
-			<div>
-				<label for="header-disciplina">Disciplina</label>
-				<input id="header-disciplina" type="text" />
-			</div>
-			<div>
-				<label for="header-professor">Professor</label>
-				<input id="header-professor" type="text" />
-			</div>
-			<div>
-				<label for="header-date">Data</label>
-				<input id="header-date" type="text" placeholder="dd/mm/aaaa" />
-			</div>
-		</div>
+		<h2>Selecionador de Template</h2>
+		<label for="templateSelect">Template</label>
+		<select id="templateSelect"></select>
+		<div class="hint">Template simples para validar preview.</div>
 	</section>
 
 	<section class="card">
-		<h2>Blocos</h2>
-		<div class="blocks-header">
-			<select id="newBlockType">
-				<option value="title">Titulo</option>
-				<option value="text">Texto</option>
-				<option value="section">Secao</option>
-				<option value="question">Questao</option>
-				<option value="image">Imagem</option>
-			</select>
-			<button id="addBlock">Adicionar</button>
-		</div>
-		<div id="blocksList"></div>
-		<div class="actions">
-			<button id="moveUp" class="secondary">Mover acima</button>
-			<button id="moveDown" class="secondary">Mover abaixo</button>
-			<button id="duplicate">Duplicar</button>
-			<button id="remove" class="secondary">Remover</button>
-		</div>
-	</section>
+		<h2>Dados do Documento</h2>
+		<label for="doc-title">Titulo</label>
+		<input id="doc-title" type="text" />
 
-	<section class="card">
-		<h2>Editor do bloco</h2>
-		<div id="blockEditor" class="empty">Selecione um bloco.</div>
+		<label for="doc-model">Modelo</label>
+		<input id="doc-model" type="text" />
+
+		<label for="doc-text">Texto</label>
+		<textarea id="doc-text"></textarea>
+
+		<div class="section">
+			<div class="section-header">
+				<span>Integrantes</span>
+				<button id="addMember" class="secondary" type="button">Adicionar integrante</button>
+			</div>
+			<div id="membersList"></div>
+		</div>
+
+		<div class="section">
+			<div class="section-header">
+				<span>Palavras-chave</span>
+			</div>
+			<div id="keywordsList" class="chips"></div>
+			<input id="keywordInput" type="text" placeholder="Digite e pressione Enter" />
+		</div>
 	</section>
 
 <script nonce="${nonce}">
 	const vscode = acquireVsCodeApi();
 	let project = ${projectJson};
-	let selectedId = project.blocks && project.blocks.length ? project.blocks[0].id : null;
+	let templates = ${templatesJson};
 
 	const statusEl = document.getElementById('status');
-	const blocksList = document.getElementById('blocksList');
-	const editorEl = document.getElementById('blockEditor');
+	const templateTitleEl = document.getElementById('templateTitle');
+	const templateSelect = document.getElementById('templateSelect');
+	const titleInput = document.getElementById('doc-title');
+	const modelInput = document.getElementById('doc-model');
+	const textInput = document.getElementById('doc-text');
+	const membersList = document.getElementById('membersList');
+	const addMemberBtn = document.getElementById('addMember');
+	const keywordsList = document.getElementById('keywordsList');
+	const keywordInput = document.getElementById('keywordInput');
 
-	const headerFields = {
-		name: document.getElementById('header-name'),
-		turma: document.getElementById('header-turma'),
-		disciplina: document.getElementById('header-disciplina'),
-		professor: document.getElementById('header-professor'),
-		date: document.getElementById('header-date')
-	};
-
-	function escapeHtml(value) {
-		return String(value)
-			.replace(/&/g, '&amp;')
-			.replace(/</g, '&lt;')
-			.replace(/>/g, '&gt;')
-			.replace(/"/g, '&quot;')
-			.replace(/'/g, '&#39;');
+	function setTemplates(next) {
+		templates = Array.isArray(next) ? next : [];
 	}
 
-	function blockLabel(type) {
-		switch (type) {
-			case 'title': return 'Titulo';
-			case 'text': return 'Texto';
-			case 'section': return 'Secao';
-			case 'question': return 'Questao';
-			case 'image': return 'Imagem';
-			default: return 'Bloco';
+	function renderTemplateOptions() {
+		templateSelect.innerHTML = '';
+		if (!templates.length) {
+			const option = document.createElement('option');
+			option.value = '';
+			option.textContent = 'Nenhum template encontrado';
+			templateSelect.appendChild(option);
+			templateSelect.disabled = true;
+			return;
 		}
+		templateSelect.disabled = false;
+		templates.forEach((template) => {
+			const option = document.createElement('option');
+			option.value = template.id;
+			option.textContent = template.name || template.id;
+			templateSelect.appendChild(option);
+		});
 	}
 
-	function blockSummary(block) {
-		const value = block.text || block.title || block.statement || block.caption || '';
-		const trimmed = String(value).trim();
-		return trimmed ? trimmed.slice(0, 30) : '...';
+	function ensureTemplateSelection() {
+		if (!templates.length) {
+			project.templateId = '';
+			return;
+		}
+		if (!project.templateId || !templates.some(template => template.id === project.templateId)) {
+			project.templateId = templates[0].id;
+		}
 	}
 
 	function setStatus(status) {
@@ -557,179 +608,213 @@ function getDiagramadorHtml(webview: vscode.Webview, project: DiagramadorProject
 		statusEl.dataset.state = status.state || 'idle';
 	}
 
-	function renderHeader() {
-		const header = project.header || {};
-		headerFields.name.value = header.name || '';
-		headerFields.turma.value = header.turma || '';
-		headerFields.disciplina.value = header.disciplina || '';
-		headerFields.professor.value = header.professor || '';
-		headerFields.date.value = header.date || '';
+	function ensureDoc() {
+		if (!project || typeof project !== 'object') {
+			project = { templateId: templates[0]?.id || '', doc: { title: '', model: '', text: '', members: [], keywords: [] } };
+		}
+		if (!project.templateId) {
+			project.templateId = templates[0]?.id || '';
+		}
+		if (!project.doc || typeof project.doc !== 'object') {
+			project.doc = { title: '', model: '', text: '', members: [], keywords: [] };
+		}
+		if (!Array.isArray(project.doc.members)) {
+			project.doc.members = [];
+		}
+		if (!Array.isArray(project.doc.keywords)) {
+			project.doc.keywords = [];
+		}
+		project.doc.title = typeof project.doc.title === 'string' ? project.doc.title : String(project.doc.title ?? '');
+		project.doc.model = typeof project.doc.model === 'string' ? project.doc.model : String(project.doc.model ?? '');
+		project.doc.text = typeof project.doc.text === 'string' ? project.doc.text : String(project.doc.text ?? '');
+		return project.doc;
+	}
 
-		Object.keys(headerFields).forEach((field) => {
-			const input = headerFields[field];
-			input.oninput = () => {
-				project.header = project.header || {};
-				project.header[field] = input.value;
-				vscode.postMessage({ type: 'updateHeader', field, value: input.value });
-			};
+	function updateDoc(patch) {
+		vscode.postMessage({ type: 'updateDoc', patch });
+	}
+
+	function renderTemplate() {
+		ensureDoc();
+		renderTemplateOptions();
+		ensureTemplateSelection();
+		const templateId = project.templateId;
+		const current = templates.find(template => template.id === templateId);
+		templateTitleEl.textContent = current ? 'Template: ' + (current.name || current.id) : 'Template: -';
+		templateSelect.value = templateId || '';
+	}
+
+	function renderMembers() {
+		const doc = ensureDoc();
+		membersList.innerHTML = '';
+		if (!doc.members.length) {
+			const empty = document.createElement('div');
+			empty.className = 'empty';
+			empty.textContent = 'Nenhum integrante adicionado.';
+			membersList.appendChild(empty);
+			return;
+		}
+		doc.members.forEach((member, index) => {
+			const row = document.createElement('div');
+			row.className = 'member-row';
+			const input = document.createElement('input');
+			input.type = 'text';
+			input.value = member || '';
+			input.addEventListener('input', () => {
+				const next = doc.members.slice();
+				next[index] = input.value;
+				doc.members = next;
+				updateDoc({ members: next });
+			});
+			const removeBtn = document.createElement('button');
+			removeBtn.type = 'button';
+			removeBtn.className = 'secondary';
+			removeBtn.textContent = 'Remover';
+			removeBtn.addEventListener('click', () => {
+				const next = doc.members.filter((_, idx) => idx !== index);
+				doc.members = next;
+				updateDoc({ members: next });
+				renderMembers();
+			});
+			row.appendChild(input);
+			row.appendChild(removeBtn);
+			membersList.appendChild(row);
 		});
 	}
 
-	function renderBlocks() {
-		blocksList.innerHTML = '';
-		if (!project.blocks || project.blocks.length === 0) {
-			blocksList.innerHTML = '<div class="empty">Nenhum bloco adicionado.</div>';
+	function renderKeywords() {
+		const doc = ensureDoc();
+		keywordsList.innerHTML = '';
+		if (!doc.keywords.length) {
+			const empty = document.createElement('div');
+			empty.className = 'empty';
+			empty.textContent = 'Nenhuma palavra-chave adicionada.';
+			keywordsList.appendChild(empty);
 			return;
 		}
-		project.blocks.forEach(block => {
-			const button = document.createElement('button');
-			button.className = 'block-item' + (block.id === selectedId ? ' selected' : '');
-			button.dataset.id = block.id;
-			button.innerHTML = '<span class="block-tag">' + escapeHtml(blockLabel(block.type)) + '</span>' +
-				'<span class="block-summary">' + escapeHtml(blockSummary(block)) + '</span>';
-			button.addEventListener('click', () => {
-				selectedId = block.id;
-				renderBlocks();
-				renderEditor();
-				updateActions();
+		doc.keywords.forEach((keyword, index) => {
+			const chip = document.createElement('div');
+			chip.className = 'chip';
+			const label = document.createElement('span');
+			label.textContent = keyword;
+			const removeBtn = document.createElement('button');
+			removeBtn.type = 'button';
+			removeBtn.textContent = 'x';
+			removeBtn.addEventListener('click', () => {
+				const next = doc.keywords.filter((_, idx) => idx !== index);
+				doc.keywords = next;
+				updateDoc({ keywords: next });
+				renderKeywords();
 			});
-			blocksList.appendChild(button);
+			chip.appendChild(label);
+			chip.appendChild(removeBtn);
+			keywordsList.appendChild(chip);
 		});
 	}
 
-	function renderEditor() {
-		const block = project.blocks ? project.blocks.find(item => item.id === selectedId) : null;
-		if (!block) {
-			editorEl.className = 'empty';
-			editorEl.textContent = 'Selecione um bloco.';
+	function renderDoc() {
+		const doc = ensureDoc();
+		titleInput.value = doc.title || '';
+		modelInput.value = doc.model || '';
+		textInput.value = doc.text || '';
+		renderMembers();
+		renderKeywords();
+	}
+
+	templateSelect.addEventListener('change', () => {
+		const value = templateSelect.value;
+		if (project.templateId === value) {
 			return;
 		}
-		editorEl.className = '';
-		editorEl.innerHTML = '';
-		if (block.type === 'title') {
-			editorEl.innerHTML = '<label>Titulo</label><input id="block-text" type="text" />';
-			const input = document.getElementById('block-text');
-			input.value = block.text || '';
-			input.oninput = () => {
-				block.text = input.value;
-				vscode.postMessage({ type: 'updateBlock', id: block.id, patch: { text: input.value } });
-			};
-		} else if (block.type === 'section') {
-			editorEl.innerHTML = '<label>Secao</label><input id="block-title" type="text" />';
-			const input = document.getElementById('block-title');
-			input.value = block.title || '';
-			input.oninput = () => {
-				block.title = input.value;
-				vscode.postMessage({ type: 'updateBlock', id: block.id, patch: { title: input.value } });
-			};
-		} else if (block.type === 'text') {
-			editorEl.innerHTML = '<label>Texto</label><textarea id="block-text"></textarea>';
-			const input = document.getElementById('block-text');
-			input.value = block.text || '';
-			input.oninput = () => {
-				block.text = input.value;
-				vscode.postMessage({ type: 'updateBlock', id: block.id, patch: { text: input.value } });
-			};
-		} else if (block.type === 'question') {
-			editorEl.innerHTML = '<label>Enunciado</label><textarea id="block-statement"></textarea>' +
-				'<label>Linhas de resposta</label><input id="block-lines" type="number" min="1" step="1" />';
-			const statement = document.getElementById('block-statement');
-			const lines = document.getElementById('block-lines');
-			statement.value = block.statement || '';
-			lines.value = block.lines || 1;
-			statement.oninput = () => {
-				block.statement = statement.value;
-				vscode.postMessage({ type: 'updateBlock', id: block.id, patch: { statement: statement.value } });
-			};
-			lines.oninput = () => {
-				const value = Math.max(1, Number(lines.value || 1));
-				block.lines = value;
-				lines.value = value;
-				vscode.postMessage({ type: 'updateBlock', id: block.id, patch: { lines: value } });
-			};
-		} else if (block.type === 'image') {
-			editorEl.innerHTML = '<label>Imagem</label>' +
-				'<div class="empty" id="assetLabel"></div>' +
-				'<button id="pickImage">Selecionar imagem</button>' +
-				'<label>Legenda</label><input id="block-caption" type="text" />';
-			const assetLabel = document.getElementById('assetLabel');
-			assetLabel.textContent = block.asset ? block.asset : 'Nenhuma imagem selecionada.';
-			const caption = document.getElementById('block-caption');
-			caption.value = block.caption || '';
-			caption.oninput = () => {
-				block.caption = caption.value;
-				vscode.postMessage({ type: 'updateBlock', id: block.id, patch: { caption: caption.value } });
-			};
-			document.getElementById('pickImage').addEventListener('click', () => {
-				vscode.postMessage({ type: 'pickImage', id: block.id });
-			});
-		}
-	}
-
-	function updateActions() {
-		const hasBlock = Boolean(selectedId);
-		document.getElementById('duplicate').disabled = !hasBlock;
-		document.getElementById('remove').disabled = !hasBlock;
-		document.getElementById('moveUp').disabled = !hasBlock;
-		document.getElementById('moveDown').disabled = !hasBlock;
-	}
-
-	document.getElementById('addBlock').addEventListener('click', () => {
-		const type = document.getElementById('newBlockType').value;
-		vscode.postMessage({ type: 'addBlock', blockType: type });
+		project.templateId = value;
+		renderTemplate();
+		vscode.postMessage({ type: 'updateTemplate', templateId: value });
 	});
 
-	document.getElementById('duplicate').addEventListener('click', () => {
-		if (selectedId) {
-			vscode.postMessage({ type: 'duplicateBlock', id: selectedId });
-		}
+	titleInput.addEventListener('input', () => {
+		const doc = ensureDoc();
+		doc.title = titleInput.value;
+		updateDoc({ title: titleInput.value });
 	});
 
-	document.getElementById('remove').addEventListener('click', () => {
-		if (selectedId) {
-			vscode.postMessage({ type: 'removeBlock', id: selectedId });
-		}
+	modelInput.addEventListener('input', () => {
+		const doc = ensureDoc();
+		doc.model = modelInput.value;
+		updateDoc({ model: modelInput.value });
 	});
 
-	document.getElementById('moveUp').addEventListener('click', () => {
-		if (selectedId) {
-			vscode.postMessage({ type: 'moveBlock', id: selectedId, direction: -1 });
-		}
+	textInput.addEventListener('input', () => {
+		const doc = ensureDoc();
+		doc.text = textInput.value;
+		updateDoc({ text: textInput.value });
 	});
 
-	document.getElementById('moveDown').addEventListener('click', () => {
-		if (selectedId) {
-			vscode.postMessage({ type: 'moveBlock', id: selectedId, direction: 1 });
+	addMemberBtn.addEventListener('click', () => {
+		const doc = ensureDoc();
+		const next = doc.members.slice();
+		next.push('');
+		doc.members = next;
+		updateDoc({ members: next });
+		renderMembers();
+	});
+
+	keywordInput.addEventListener('keydown', (event) => {
+		if (event.key !== 'Enter') {
+			return;
 		}
+		event.preventDefault();
+		const value = keywordInput.value.trim();
+		if (!value) {
+			return;
+		}
+		const doc = ensureDoc();
+		const next = doc.keywords.slice();
+		next.push(value);
+		doc.keywords = next;
+		keywordInput.value = '';
+		updateDoc({ keywords: next });
+		renderKeywords();
 	});
 
 	window.addEventListener('message', (event) => {
 		const msg = event.data;
-		if (msg.type === 'project') {
-			project = msg.project;
-			if (!project.blocks || project.blocks.length === 0) {
-				selectedId = null;
-			} else if (!selectedId || !project.blocks.find(item => item.id === selectedId)) {
-				selectedId = project.blocks[0].id;
+		if (msg.type === 'templates') {
+			setTemplates(msg.templates);
+			const previous = project.templateId;
+			renderTemplate();
+			if (project.templateId && project.templateId !== previous) {
+				vscode.postMessage({ type: 'updateTemplate', templateId: project.templateId });
 			}
-			renderHeader();
-			renderBlocks();
-			renderEditor();
-			updateActions();
+		}
+		if (msg.type === 'project') {
+			const previous = project?.templateId;
+			project = msg.project;
+			renderTemplate();
+			renderDoc();
+			if (project?.templateId && project.templateId !== previous) {
+				vscode.postMessage({ type: 'updateTemplate', templateId: project.templateId });
+			}
 		}
 		if (msg.type === 'status') {
 			setStatus(msg.status);
 		}
 	});
 
-	renderHeader();
-	renderBlocks();
-	renderEditor();
-	updateActions();
+	renderTemplate();
+	renderDoc();
 	vscode.postMessage({ type: 'ready' });
 </script>
 </body>
 </html>`;
+}
+
+function escapeHtml(value: string): string {
+	return String(value)
+		.replace(/&/g, '&amp;')
+		.replace(/</g, '&lt;')
+		.replace(/>/g, '&gt;')
+		.replace(/"/g, '&quot;')
+		.replace(/'/g, '&#39;');
 }
 
 function getNonce() {

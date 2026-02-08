@@ -149,6 +149,19 @@
 		{
 			"type": "extensionHost",
 			"request": "launch",
+			"name": "CO Shell Extension",
+			"runtimeExecutable": "${execPath}",
+			"args": [
+				"--extensionDevelopmentPath=${workspaceFolder}/extensions/co-shell"
+			],
+			"outFiles": [
+				"${workspaceFolder}/extensions/co-shell/out/**/*.js"
+			],
+			"preLaunchTask": "Ext - Build"
+		},
+		{
+			"type": "extensionHost",
+			"request": "launch",
 			"name": "VS Code API Tests (single folder)",
 			"runtimeExecutable": "${execPath}",
 			"args": [

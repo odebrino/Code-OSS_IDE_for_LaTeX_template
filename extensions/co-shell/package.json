@@ -5,6 +5,9 @@
 	"publisher": "odebrino",
 	"version": "0.0.1",
 	"license": "MIT",
+	"dependencies": {
+		"co-template-core": "file:../co-template-core"
+	},
 	"engines": {
 		"vscode": "^1.90.0"
 	},
@@ -53,7 +56,7 @@
 			"diagramador": [
 				{
 					"id": "co.diagramador.blocksView",
-					"name": "Editor de Blocos",
+					"name": "Template e Dados",
 					"type": "webview"
 				}
 			],

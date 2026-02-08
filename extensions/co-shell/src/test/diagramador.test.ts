@@ -18,13 +18,13 @@ suite('Diagramador', () => {
 
 	test('serialize/parse preserva o modelo', () => {
 		const project = createDefaultProject();
-		project.header.name = 'Ana';
-		project.blocks.push({ id: '1', type: 'text', text: 'Ola' });
+		project.doc.title = 'Ana';
+		project.doc.members = ['A', 'B'];
 		const raw = serializeProject(project);
 		const parsed = parseProject(raw);
 		assert.ok(parsed);
-		assert.strictEqual(parsed?.header.name, 'Ana');
-		assert.strictEqual(parsed?.blocks.length, 1);
-		assert.strictEqual(parsed?.blocks[0].type, 'text');
+		assert.strictEqual(parsed?.doc.title, 'Ana');
+		assert.strictEqual(parsed?.doc.members.length, 2);
+		assert.strictEqual(parsed?.templateId, 'test_v0');
 	});
 });

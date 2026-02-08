@@ -1,0 +1,57 @@
+{
+	"name": "co-template-generator",
+	"displayName": "Gerador de Template",
+	"description": "Gerador de templates LaTeX para CO",
+	"publisher": "odebrino",
+	"version": "0.0.1",
+	"license": "MIT",
+	"engines": {
+		"vscode": "^1.90.0"
+	},
+	"categories": [
+		"Other"
+	],
+	"main": "./out/extension.js",
+	"activationEvents": [
+		"onView:co.templateGenerator.mainView",
+		"onCommand:co.templateGenerator.open"
+	],
+	"dependencies": {
+		"co-template-core": "file:../co-template-core",
+		"yazl": "^2.5.1"
+	},
+	"devDependencies": {
+		"@types/node": "^22.18.10",
+		"@types/yazl": "^2.4.2"
+	},
+	"contributes": {
+		"commands": [
+			{ "command": "co.templateGenerator.open", "title": "CO: Abrir Gerador de Template" }
+		],
+		"menus": {
+			"commandPalette": [
+				{ "command": "co.templateGenerator.open", "when": "co.cozitos != true" }
+			]
+		},
+		"viewsContainers": {
+			"activitybar": [
+				{
+					"id": "co.templateGenerator",
+					"title": "Templates",
+					"icon": "resources/co-view.svg",
+					"when": "co.cozitos != true"
+				}
+			]
+		},
+		"views": {
+			"co.templateGenerator": [
+				{
+					"id": "co.templateGenerator.mainView",
+					"name": "Gerador de Template",
+					"type": "webview",
+					"when": "co.cozitos != true"
+				}
+			]
+		}
+	}
+}
