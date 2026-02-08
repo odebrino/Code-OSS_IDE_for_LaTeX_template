@@ -5,6 +5,7 @@
 
 import * as vscode from 'vscode';
 import path from 'path';
+import os from 'os';
 import fs from 'fs/promises';
 import * as yazl from 'yazl';
 import {
@@ -87,6 +88,7 @@ function isCozitosEnabled(): boolean {
 }
 
 class TemplateGeneratorController implements vscode.Disposable {
+	private static readonly AUTO_COMPILE_KEY = 'co.templateGenerator.autoCompile';
 	private viewProvider?: TemplateGeneratorViewProvider;
 	private templates: TemplateSummary[] = [];
 	private currentTemplate?: TemplatePackage;
@@ -96,21 +98,26 @@ class TemplateGeneratorController implements vscode.Disposable {
 	private readonly output: vscode.OutputChannel;
 	private previewPanel?: vscode.WebviewPanel;
 	private initialized = false;
+	private autoCompile = true;
+	private bundlePath?: string;
 
 	constructor(private readonly context: vscode.ExtensionContext) {
 		this.output = vscode.window.createOutputChannel('Gerador de Template');
+		this.autoCompile = context.globalState.get<boolean>(TemplateGeneratorController.AUTO_COMPILE_KEY) ?? true;
 		this.templateStorage = resolveTemplateStoragePaths(
 			context.globalStorageUri.fsPath,
 			path.resolve(context.extensionPath, '..', '..')
 		);
 		this.previewRoot = path.join(path.dirname(this.templateStorage.primaryDir), 'preview');
 		this.buildService = new TemplateBuildService({
+			debounceMs: 1500,
 			onStatus: status => this.viewProvider?.sendStatus(status),
 			onComplete: result => this.handleBuildResult(result)
 		});
 	}
 
 	async initialize() {
+		await this.resolveBundlePath();
 		await this.refreshTemplates();
 		if (!this.currentTemplate && this.templates.length) {
 			await this.selectTemplate(this.templates[0].id, { silent: true, skipBuild: true });
@@ -137,7 +144,10 @@ class TemplateGeneratorController implements vscode.Disposable {
 					previewData: this.currentTemplate.previewData,
 					readOnly: this.currentTemplate.readOnly
 				}
-				: undefined
+				: undefined,
+			settings: {
+				autoCompile: this.autoCompile
+			}
 		};
 	}
 
@@ -182,6 +192,12 @@ class TemplateGeneratorController implements vscode.Disposable {
 				return;
 			case 'saveTemplate':
 				await this.saveTemplateDraft(message?.draft, message?.previousId);
+				return;
+			case 'setAutoCompile':
+				await this.setAutoCompile(message?.value);
+				return;
+			case 'buildNow':
+				await this.buildNow();
 				return;
 			default:
 				return;
@@ -357,12 +373,81 @@ class TemplateGeneratorController implements vscode.Disposable {
 		if (!this.currentTemplate) {
 			return;
 		}
+		if (!this.autoCompile) {
+			this.viewProvider?.sendStatus({ state: 'idle', message: 'Compilacao manual.' });
+			return;
+		}
 		const outDir = path.join(this.previewRoot, this.currentTemplate.manifest.id);
 		this.buildService.schedule({
 			template: this.currentTemplate,
 			previewData: this.currentTemplate.previewData ?? {},
 			outDir
 		});
+	}
+
+	private async buildNow() {
+		if (!this.currentTemplate) {
+			return;
+		}
+		const outDir = path.join(this.previewRoot, this.currentTemplate.manifest.id);
+		this.buildService.buildNow({
+			template: this.currentTemplate,
+			previewData: this.currentTemplate.previewData ?? {},
+			outDir
+		});
+	}
+
+	private async setAutoCompile(value: any) {
+		const next = Boolean(value);
+		if (this.autoCompile === next) {
+			return;
+		}
+		this.autoCompile = next;
+		await this.context.globalState.update(TemplateGeneratorController.AUTO_COMPILE_KEY, next);
+		this.viewProvider?.sendState(this.getState());
+		if (this.autoCompile) {
+			await this.scheduleBuild();
+		} else {
+			this.viewProvider?.sendStatus({ state: 'idle', message: 'Compilacao manual.' });
+		}
+	}
+
+	private async resolveBundlePath() {
+		if (this.bundlePath) {
+			return;
+		}
+		const configured = vscode.workspace.getConfiguration('co').get<string>('tectonic.bundlePath');
+		const envBundle = process.env.CO_TECTONIC_BUNDLE || process.env.TECTONIC_BUNDLE;
+		const storageBundle = path.join(this.context.globalStorageUri.fsPath, 'tectonic.bundle');
+		const fromEnv = await pickExistingPath(envBundle);
+		if (fromEnv) {
+			process.env.CO_TECTONIC_BUNDLE = fromEnv;
+			this.bundlePath = fromEnv;
+			return;
+		}
+		const fromConfig = await pickExistingPath(configured);
+		if (fromConfig) {
+			process.env.CO_TECTONIC_BUNDLE = fromConfig;
+			this.bundlePath = fromConfig;
+			return;
+		}
+		if (await fileExists(storageBundle)) {
+			process.env.CO_TECTONIC_BUNDLE = storageBundle;
+			this.bundlePath = storageBundle;
+			return;
+		}
+		const cached = await findBundleInCache();
+		if (cached) {
+			await fs.mkdir(this.context.globalStorageUri.fsPath, { recursive: true });
+			try {
+				await fs.copyFile(cached, storageBundle);
+				process.env.CO_TECTONIC_BUNDLE = storageBundle;
+				this.bundlePath = storageBundle;
+			} catch {
+				process.env.CO_TECTONIC_BUNDLE = cached;
+				this.bundlePath = cached;
+			}
+		}
 	}
 
 	private async handleBuildResult(result: TemplateBuildResult) {
@@ -451,6 +536,60 @@ function cloneData<T>(data: T): T {
 
 function isPlainObject(value: any): value is Record<string, any> {
 	return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+async function pickExistingPath(value: string | undefined) {
+	if (!value || typeof value !== 'string') {
+		return undefined;
+	}
+	const trimmed = value.trim();
+	if (!trimmed) {
+		return undefined;
+	}
+	if (await fileExists(trimmed)) {
+		return trimmed;
+	}
+	return undefined;
+}
+
+async function findBundleInCache(): Promise<string | undefined> {
+	const cacheRoot = process.env.XDG_CACHE_HOME || path.join(os.homedir(), '.cache');
+	const candidates = [
+		path.join(cacheRoot, 'Tectonic'),
+		path.join(cacheRoot, 'tectonic')
+	];
+	for (const dir of candidates) {
+		const found = await findBundleInDir(dir, 2);
+		if (found) {
+			return found;
+		}
+	}
+	return undefined;
+}
+
+async function findBundleInDir(dir: string, depth: number): Promise<string | undefined> {
+	try {
+		const entries = await fs.readdir(dir, { withFileTypes: true });
+		const direct = entries.find(entry => entry.isFile() && entry.name.endsWith('.bundle'));
+		if (direct) {
+			return path.join(dir, direct.name);
+		}
+		if (depth <= 0) {
+			return undefined;
+		}
+		for (const entry of entries) {
+			if (!entry.isDirectory()) {
+				continue;
+			}
+			const nested = await findBundleInDir(path.join(dir, entry.name), depth - 1);
+			if (nested) {
+				return nested;
+			}
+		}
+		return undefined;
+	} catch {
+		return undefined;
+	}
 }
 
 async function fileExists(filePath: string) {

@@ -32,7 +32,7 @@ import {
 import { DiagramadorStatus, DiagramadorViewProvider, registerDiagramadorView } from './webview';
 
 export async function activate(context: vscode.ExtensionContext) {
-	const diagramadorController = new DiagramadorController(context.extensionUri.fsPath, context.globalStorageUri.fsPath);
+	const diagramadorController = new DiagramadorController(context);
 	await diagramadorController.initialize();
 	const diagramadorProvider = registerDiagramadorView(
 		context,
@@ -70,6 +70,7 @@ type PdfJsPaths = {
 };
 
 class DiagramadorController implements vscode.Disposable {
+	private static readonly AUTO_COMPILE_KEY = 'co.diagramador.autoCompile';
 	private project: DiagramadorProject = createDefaultProject();
 	private readonly paths: DiagramadorPaths;
 	private viewProvider?: DiagramadorViewProvider;
@@ -82,27 +83,35 @@ class DiagramadorController implements vscode.Disposable {
 	private templates: TemplateSummary[] = [];
 	private readonly templateCache = new Map<string, TemplatePackage>();
 	private initialized = false;
+	private autoCompile = true;
+	private bundlePath?: string;
 
-	constructor(private readonly extensionRoot: string, globalStoragePath: string) {
+	constructor(private readonly context: vscode.ExtensionContext) {
+		const extensionRoot = context.extensionUri.fsPath;
+		const globalStoragePath = context.globalStorageUri.fsPath;
+		this.autoCompile = context.globalState.get<boolean>(DiagramadorController.AUTO_COMPILE_KEY) ?? true;
 		this.paths = resolveDiagramadorPaths();
 		this.output = vscode.window.createOutputChannel('Diagramador');
-		this.headerImagePath = path.join(this.extensionRoot, 'resources', this.headerImageName);
-		this.templateStorage = resolveTemplateStoragePaths(globalStoragePath, path.resolve(this.extensionRoot, '..', '..'));
+		this.headerImagePath = path.join(extensionRoot, 'resources', this.headerImageName);
+		this.templateStorage = resolveTemplateStoragePaths(globalStoragePath, path.resolve(extensionRoot, '..', '..'));
 		this.buildService = new TemplateBuildService({
+			debounceMs: 1500,
 			onStatus: status => this.handleStatus(status),
 			onComplete: result => this.handleBuildResult(result)
 		});
-		this.previewManager = new DiagramadorPreviewManager(this.output, this.extensionRoot, vscode.env.appName);
+		this.previewManager = new DiagramadorPreviewManager(this.output, extensionRoot, vscode.env.appName);
 	}
 
 	async initialize() {
 		await ensureDiagramadorDirs(this.paths);
+		await this.resolveBundlePath();
 		this.project = await loadDiagramadorProject(this.paths);
 		await this.ensureDefaultTemplate();
 		const selectionChanged = await this.refreshTemplates();
 		this.initialized = true;
 		this.viewProvider?.sendProject(this.project);
 		this.viewProvider?.sendTemplates(this.templates);
+		this.viewProvider?.sendConfig({ autoCompile: this.autoCompile });
 		if (selectionChanged) {
 			await saveDiagramadorProject(this.paths, this.project);
 		}
@@ -114,6 +123,7 @@ class DiagramadorController implements vscode.Disposable {
 		if (this.initialized) {
 			this.viewProvider.sendProject(this.project);
 			this.viewProvider.sendTemplates(this.templates);
+			this.viewProvider.sendConfig({ autoCompile: this.autoCompile });
 		}
 	}
 
@@ -137,12 +147,19 @@ class DiagramadorController implements vscode.Disposable {
 			case 'ready':
 				this.viewProvider?.sendProject(this.project);
 				this.viewProvider?.sendTemplates(this.templates);
+				this.viewProvider?.sendConfig({ autoCompile: this.autoCompile });
 				return;
 			case 'updateTemplate':
 				await this.updateTemplate(message?.templateId);
 				return;
 			case 'updateDoc':
 				await this.updateDoc(message?.patch);
+				return;
+			case 'setAutoCompile':
+				await this.setAutoCompile(message?.value);
+				return;
+			case 'buildNow':
+				await this.buildNow();
 				return;
 			default:
 				return;
@@ -217,6 +234,10 @@ class DiagramadorController implements vscode.Disposable {
 	}
 
 	private async scheduleBuild() {
+		if (!this.autoCompile) {
+			this.handleStatus({ state: 'idle', message: 'Compilacao manual.' });
+			return;
+		}
 		const template = await this.getTemplatePackage(this.project.templateId);
 		if (!template) {
 			this.handleStatus({ state: 'error', message: 'Template nao encontrado.' });
@@ -228,6 +249,35 @@ class DiagramadorController implements vscode.Disposable {
 			previewData,
 			outDir: this.paths.outDir
 		});
+	}
+
+	private async buildNow() {
+		const template = await this.getTemplatePackage(this.project.templateId);
+		if (!template) {
+			this.handleStatus({ state: 'error', message: 'Template nao encontrado.' });
+			return;
+		}
+		const previewData = createTemplateData(this.project);
+		this.buildService.buildNow({
+			template,
+			previewData,
+			outDir: this.paths.outDir
+		});
+	}
+
+	private async setAutoCompile(value: any) {
+		const next = Boolean(value);
+		if (this.autoCompile === next) {
+			return;
+		}
+		this.autoCompile = next;
+		await this.context.globalState.update(DiagramadorController.AUTO_COMPILE_KEY, next);
+		this.viewProvider?.sendConfig({ autoCompile: this.autoCompile });
+		if (this.autoCompile) {
+			await this.scheduleBuild();
+		} else {
+			this.handleStatus({ state: 'idle', message: 'Compilacao manual.' });
+		}
 	}
 
 	private async refreshTemplates(): Promise<boolean> {
@@ -299,6 +349,44 @@ class DiagramadorController implements vscode.Disposable {
 			await fs.copyFile(this.headerImagePath, path.join(template.assetsDir, this.headerImageName));
 		} catch (err: any) {
 			this.output.appendLine(`[${new Date().toISOString()}] Falha ao criar template padrao: ${err?.message ?? err}`);
+		}
+	}
+
+	private async resolveBundlePath() {
+		if (this.bundlePath) {
+			return;
+		}
+		const configured = vscode.workspace.getConfiguration('co').get<string>('tectonic.bundlePath');
+		const envBundle = process.env.CO_TECTONIC_BUNDLE || process.env.TECTONIC_BUNDLE;
+		const storageBundle = path.join(this.context.globalStorageUri.fsPath, 'tectonic.bundle');
+		const fromEnv = await pickExistingPath(envBundle);
+		if (fromEnv) {
+			process.env.CO_TECTONIC_BUNDLE = fromEnv;
+			this.bundlePath = fromEnv;
+			return;
+		}
+		const fromConfig = await pickExistingPath(configured);
+		if (fromConfig) {
+			process.env.CO_TECTONIC_BUNDLE = fromConfig;
+			this.bundlePath = fromConfig;
+			return;
+		}
+		if (await fileExists(storageBundle)) {
+			process.env.CO_TECTONIC_BUNDLE = storageBundle;
+			this.bundlePath = storageBundle;
+			return;
+		}
+		const cached = await findBundleInCache();
+		if (cached) {
+			await fs.mkdir(this.context.globalStorageUri.fsPath, { recursive: true });
+			try {
+				await fs.copyFile(cached, storageBundle);
+				process.env.CO_TECTONIC_BUNDLE = storageBundle;
+				this.bundlePath = storageBundle;
+			} catch {
+				process.env.CO_TECTONIC_BUNDLE = cached;
+				this.bundlePath = cached;
+			}
 		}
 	}
 
@@ -1078,6 +1166,60 @@ async function atomicWrite(filePath: string, content: string) {
 	} catch {
 		await fs.unlink(filePath).catch(() => undefined);
 		await fs.rename(tmpPath, filePath);
+	}
+}
+
+async function pickExistingPath(value: string | undefined) {
+	if (!value || typeof value !== 'string') {
+		return undefined;
+	}
+	const trimmed = value.trim();
+	if (!trimmed) {
+		return undefined;
+	}
+	if (await fileExists(trimmed)) {
+		return trimmed;
+	}
+	return undefined;
+}
+
+async function findBundleInCache(): Promise<string | undefined> {
+	const cacheRoot = process.env.XDG_CACHE_HOME || path.join(os.homedir(), '.cache');
+	const candidates = [
+		path.join(cacheRoot, 'Tectonic'),
+		path.join(cacheRoot, 'tectonic')
+	];
+	for (const dir of candidates) {
+		const found = await findBundleInDir(dir, 2);
+		if (found) {
+			return found;
+		}
+	}
+	return undefined;
+}
+
+async function findBundleInDir(dir: string, depth: number): Promise<string | undefined> {
+	try {
+		const entries = await fs.readdir(dir, { withFileTypes: true });
+		const direct = entries.find(entry => entry.isFile() && entry.name.endsWith('.bundle'));
+		if (direct) {
+			return path.join(dir, direct.name);
+		}
+		if (depth <= 0) {
+			return undefined;
+		}
+		for (const entry of entries) {
+			if (!entry.isDirectory()) {
+				continue;
+			}
+			const nested = await findBundleInDir(path.join(dir, entry.name), depth - 1);
+			if (nested) {
+				return nested;
+			}
+		}
+		return undefined;
+	} catch {
+		return undefined;
 	}
 }
 

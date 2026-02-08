@@ -50,6 +50,16 @@
 					"type": "webview"
 				}
 			]
+		},
+		"configuration": {
+			"title": "CO",
+			"properties": {
+				"co.tectonic.bundlePath": {
+					"type": "string",
+					"default": "",
+					"description": "Caminho para o bundle offline do Tectonic."
+				}
+			}
 		}
 	}
 }

@@ -236,18 +236,37 @@ export async function buildPreview(
 	options?: BuildPreviewOptions
 ): Promise<TemplateBuildResult> {
 	await fs.mkdir(outDir, { recursive: true });
-	const assetsOutDir = path.join(outDir, 'assets');
-	await syncAssets(template.assetsDir, assetsOutDir);
 	const data = mergeTemplateData(template.manifest.defaults, previewData);
 	const tex = renderTemplate(template.mainTex, data);
 	const texPath = path.join(outDir, 'preview.tex');
-	await fs.writeFile(texPath, tex, 'utf8');
-	const result = await runTectonic(texPath, outDir, options?.onProcess);
+	const previousTex = await readTextFile(texPath);
+	const texChanged = previousTex !== tex;
+	if (texChanged) {
+		await fs.writeFile(texPath, tex, 'utf8');
+	}
+	const assetsOutDir = path.join(outDir, 'assets');
+	const assetsCachePath = path.join(outDir, '.assets-cache');
+	const assetsChanged = await syncAssetsIfChanged(template.assetsDir, assetsOutDir, assetsCachePath);
+	const pdfPath = path.join(outDir, 'preview.pdf');
 	const logPath = path.join(outDir, 'build.log');
+	if (!texChanged && !assetsChanged && await fileExists(pdfPath)) {
+		await writeBuildLog(logPath, { ok: true, stdout: 'Cache hit.', stderr: '' });
+		return {
+			ok: true,
+			stdout: '',
+			stderr: '',
+			friendly: '',
+			notFound: false,
+			pdfPath,
+			logPath,
+			texPath
+		};
+	}
+	const result = await runTectonic(texPath, outDir, options?.onProcess);
 	await writeBuildLog(logPath, result);
 	return {
 		...result,
-		pdfPath: path.join(outDir, 'preview.pdf'),
+		pdfPath,
 		logPath,
 		texPath
 	};
@@ -279,6 +298,16 @@ export class TemplateBuildService {
 		this.timer = setTimeout(() => {
 			void this.runBuild();
 		}, this.debounceMs);
+	}
+
+	buildNow(request: TemplateBuildRequest) {
+		this.pending = request;
+		this.cancelRunning();
+		if (this.timer) {
+			clearTimeout(this.timer);
+			this.timer = undefined;
+		}
+		void this.runBuild();
 	}
 
 	dispose() {
@@ -442,6 +471,14 @@ async function fileExists(filePath: string) {
 	}
 }
 
+async function readTextFile(filePath: string): Promise<string | undefined> {
+	try {
+		return await fs.readFile(filePath, 'utf8');
+	} catch {
+		return undefined;
+	}
+}
+
 function mergeTemplateData(defaults: Record<string, any> | undefined, previewData: Record<string, any>): Record<string, any> {
 	const base = defaults && typeof defaults === 'object' && !Array.isArray(defaults) ? defaults : {};
 	return { ...base, ...previewData };
@@ -508,6 +545,48 @@ async function syncAssets(sourceDir: string, targetDir: string) {
 	}
 	await fs.rm(targetDir, { recursive: true, force: true });
 	await copyDirectory(sourceDir, targetDir);
+}
+
+async function syncAssetsIfChanged(sourceDir: string, targetDir: string, cachePath: string): Promise<boolean> {
+	const signature = await getAssetsSignature(sourceDir);
+	const previous = await readTextFile(cachePath) ?? '';
+	let changed = signature !== previous;
+	if (!changed && signature === '') {
+		const targetExists = await fileExists(targetDir);
+		if (targetExists) {
+			changed = true;
+		}
+	}
+	if (changed) {
+		await syncAssets(sourceDir, targetDir);
+		await fs.writeFile(cachePath, signature, 'utf8');
+	}
+	return changed;
+}
+
+async function getAssetsSignature(dir: string): Promise<string> {
+	if (!await fileExists(dir)) {
+		return '';
+	}
+	const entries: string[] = [];
+	await collectAssetEntries(dir, dir, entries);
+	entries.sort();
+	return entries.join('\n');
+}
+
+async function collectAssetEntries(rootDir: string, currentDir: string, entries: string[]) {
+	const dirents = await fs.readdir(currentDir, { withFileTypes: true });
+	for (const entry of dirents) {
+		const sourcePath = path.join(currentDir, entry.name);
+		if (entry.isDirectory()) {
+			await collectAssetEntries(rootDir, sourcePath, entries);
+		} else if (entry.isFile()) {
+			const stat = await fs.stat(sourcePath);
+			const rel = path.relative(rootDir, sourcePath).split(path.sep).join('/');
+			const signature = `${rel}|${stat.size}|${Math.round(stat.mtimeMs)}`;
+			entries.push(signature);
+		}
+	}
 }
 
 async function copyDirectory(sourceDir: string, targetDir: string) {
