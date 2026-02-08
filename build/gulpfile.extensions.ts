@@ -34,6 +34,7 @@ const commit = getVersion(root);
 // });
 const compilations = [
 	'extensions/configuration-editing/tsconfig.json',
+	'extensions/co-diagramador/tsconfig.json',
 	'extensions/co-shell/tsconfig.json',
 	'packages/co-template-core/tsconfig.json',
 	'extensions/co-template-generator/tsconfig.json',

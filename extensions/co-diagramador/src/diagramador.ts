@@ -61,7 +61,7 @@ export const TEMPLATE_TEST_V0 = String.raw`\documentclass[12pt]{article}
 \fi
 
 % ========= Variaveis =========
-\newcommand{\HeaderImage}{assets/modelo_header_image1.png}
+\newcommand{\HeaderImage}{assets/modelo_header_image1.jpg}
 \newcommand{\TaskNumber}{XX}
 
 \newcommand{\DivulgDate}{00/04/2020}

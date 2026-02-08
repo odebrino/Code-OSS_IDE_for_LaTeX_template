@@ -35,6 +35,7 @@ export const dirs = [
 	'extensions/markdown-language-features',
 	'extensions/markdown-math',
 	'extensions/latex-workshop',
+	'extensions/co-diagramador',
 	'extensions/co-shell',
 	'extensions/co-template-generator',
 	'packages/co-template-core',

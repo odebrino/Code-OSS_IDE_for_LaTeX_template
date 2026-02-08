@@ -1,0 +1,55 @@
+{
+	"name": "co-diagramador",
+	"displayName": "Diagramador",
+	"description": "Diagramador de templates LaTeX para CO",
+	"publisher": "odebrino",
+	"version": "0.0.1",
+	"license": "MIT",
+	"dependencies": {
+		"co-template-core": "file:../../packages/co-template-core"
+	},
+	"engines": {
+		"vscode": "^1.90.0"
+	},
+	"categories": [
+		"Other"
+	],
+	"main": "./out/extension.js",
+	"activationEvents": [
+		"onView:co.diagramador.blocksView",
+		"onCommand:co.diagramador.open"
+	],
+	"capabilities": {
+		"virtualWorkspaces": true,
+		"untrustedWorkspaces": {
+			"supported": true
+		}
+	},
+	"devDependencies": {
+		"@types/node": "^22.18.10"
+	},
+	"contributes": {
+		"commands": [
+			{ "command": "co.diagramador.open", "title": "CO: Abrir Diagramador" }
+		],
+		"menus": {
+			"commandPalette": [
+				{ "command": "co.diagramador.open" }
+			]
+		},
+		"viewsContainers": {
+			"activitybar": [
+				{ "id": "diagramador", "title": "Diagramador", "icon": "resources/co-view.svg" }
+			]
+		},
+		"views": {
+			"diagramador": [
+				{
+					"id": "co.diagramador.blocksView",
+					"name": "Template e Dados",
+					"type": "webview"
+				}
+			]
+		}
+	}
+}
