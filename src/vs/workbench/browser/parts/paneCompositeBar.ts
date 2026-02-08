@@ -80,6 +80,10 @@ const COZITOS_SIDEBAR_FORCE_PIN = new Set<string>([
 	'diagramador'
 ]);
 
+const CO_DEV_SIDEBAR_FORCE_PIN = new Set<string>([
+	'co.templateGenerator'
+]);
+
 export interface IPaneCompositeBarOptions {
 	readonly partContainerClass: string;
 	readonly pinnedViewContainersKey: string;
@@ -782,10 +786,6 @@ export class PaneCompositeBar extends Disposable {
 	}
 
 	private applyCozitosPinnedPolicy(pinnedViewContainers: IPinnedViewContainer[]): IPinnedViewContainer[] {
-		if (!this.shouldApplyCozitosPinnedPolicy()) {
-			return pinnedViewContainers;
-		}
-
 		const result = pinnedViewContainers.map(entry => ({ ...entry }));
 		const index = new Map(result.map((entry, i) => [entry.id, i]));
 
@@ -799,12 +799,20 @@ export class PaneCompositeBar extends Disposable {
 			}
 		};
 
-		for (const id of COZITOS_SIDEBAR_FORCE_UNPIN) {
-			ensure(id, false);
+		if (this.shouldApplyCoDevPinnedPolicy()) {
+			for (const id of CO_DEV_SIDEBAR_FORCE_PIN) {
+				ensure(id, true);
+			}
 		}
 
-		for (const id of COZITOS_SIDEBAR_FORCE_PIN) {
-			ensure(id, true);
+		if (this.shouldApplyCozitosPinnedPolicy()) {
+			for (const id of COZITOS_SIDEBAR_FORCE_UNPIN) {
+				ensure(id, false);
+			}
+
+			for (const id of COZITOS_SIDEBAR_FORCE_PIN) {
+				ensure(id, true);
+			}
 		}
 
 		return result;
@@ -812,6 +820,20 @@ export class PaneCompositeBar extends Disposable {
 
 	private shouldApplyCozitosPinnedPolicy(): boolean {
 		return this.location === ViewContainerLocation.Sidebar && this.isCozitosEnabled();
+	}
+
+	private shouldApplyCoDevPinnedPolicy(): boolean {
+		if (this.location !== ViewContainerLocation.Sidebar) {
+			return false;
+		}
+		if (this.isCozitosEnabled()) {
+			return false;
+		}
+		try {
+			return typeof process !== 'undefined' && process.env?.VSCODE_DEV === '1';
+		} catch {
+			return false;
+		}
 	}
 
 	private isCozitosEnabled(): boolean {

@@ -4,6 +4,7 @@
  *--------------------------------------------------------------------------------------------*/
 
 import { ChildProcess, spawn } from 'child_process';
+import crypto from 'crypto';
 import fs from 'fs/promises';
 import path from 'path';
 
@@ -248,10 +249,17 @@ export async function buildPreview(
 	}
 	const assetsOutDir = path.join(outDir, 'assets');
 	const assetsCachePath = path.join(outDir, '.assets-cache');
-	const assetsChanged = await syncAssetsIfChanged(template.assetsDir, assetsOutDir, assetsCachePath);
+	const assetsSync = await syncAssetsIfChanged(template.assetsDir, assetsOutDir, assetsCachePath);
 	const pdfPath = path.join(outDir, 'preview.pdf');
 	const logPath = path.join(outDir, 'build.log');
-	if (!texChanged && !assetsChanged && await fileExists(pdfPath)) {
+	const buildCachePath = path.join(outDir, '.preview-cache.json');
+	const texHash = hashText(tex);
+	const buildCache = await readBuildCache(buildCachePath);
+	const cacheHit = Boolean(buildCache
+		&& buildCache.texHash === texHash
+		&& buildCache.assetsSignature === assetsSync.signature
+		&& await fileExists(pdfPath));
+	if (cacheHit) {
 		await writeBuildLog(logPath, { ok: true, stdout: 'Cache hit.', stderr: '' });
 		return {
 			ok: true,
@@ -266,6 +274,12 @@ export async function buildPreview(
 	}
 	const result = await runTectonic(texPath, outDir, options?.onProcess, options);
 	await writeBuildLog(logPath, result);
+	if (result.ok) {
+		await writeBuildCache(buildCachePath, {
+			texHash,
+			assetsSignature: assetsSync.signature
+		});
+	}
 	return {
 		...result,
 		pdfPath,
@@ -472,6 +486,24 @@ async function readTextFile(filePath: string): Promise<string | undefined> {
 	}
 }
 
+async function readBuildCache(filePath: string): Promise<{ texHash: string; assetsSignature: string } | undefined> {
+	try {
+		const raw = await fs.readFile(filePath, 'utf8');
+		const parsed = JSON.parse(raw) as { texHash?: string; assetsSignature?: string };
+		if (!parsed || typeof parsed.texHash !== 'string' || typeof parsed.assetsSignature !== 'string') {
+			return undefined;
+		}
+		return { texHash: parsed.texHash, assetsSignature: parsed.assetsSignature };
+	} catch {
+		return undefined;
+	}
+}
+
+async function writeBuildCache(filePath: string, cache: { texHash: string; assetsSignature: string }) {
+	const content = JSON.stringify(cache);
+	await fs.writeFile(filePath, content, 'utf8');
+}
+
 function mergeTemplateData(defaults: Record<string, any> | undefined, previewData: Record<string, any>): Record<string, any> {
 	const base = defaults && typeof defaults === 'object' && !Array.isArray(defaults) ? defaults : {};
 	return { ...base, ...previewData };
@@ -531,6 +563,10 @@ function replaceNewCommand(source: string, name: string, value: string): string 
 	return source.replace(pattern, `\\newcommand{\\${name}}{${value}}`);
 }
 
+function hashText(value: string): string {
+	return crypto.createHash('sha256').update(value).digest('hex');
+}
+
 async function syncAssets(sourceDir: string, targetDir: string) {
 	if (!await fileExists(sourceDir)) {
 		await fs.rm(targetDir, { recursive: true, force: true });
@@ -540,7 +576,7 @@ async function syncAssets(sourceDir: string, targetDir: string) {
 	await copyDirectory(sourceDir, targetDir);
 }
 
-async function syncAssetsIfChanged(sourceDir: string, targetDir: string, cachePath: string): Promise<boolean> {
+async function syncAssetsIfChanged(sourceDir: string, targetDir: string, cachePath: string): Promise<{ changed: boolean; signature: string }> {
 	const signature = await getAssetsSignature(sourceDir);
 	const previous = await readTextFile(cachePath) ?? '';
 	let changed = signature !== previous;
@@ -554,7 +590,7 @@ async function syncAssetsIfChanged(sourceDir: string, targetDir: string, cachePa
 		await syncAssets(sourceDir, targetDir);
 		await fs.writeFile(cachePath, signature, 'utf8');
 	}
-	return changed;
+	return { changed, signature };
 }
 
 async function getAssetsSignature(dir: string): Promise<string> {
