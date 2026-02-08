@@ -35,7 +35,7 @@ const commit = getVersion(root);
 const compilations = [
 	'extensions/configuration-editing/tsconfig.json',
 	'extensions/co-shell/tsconfig.json',
-	'extensions/co-template-core/tsconfig.json',
+	'packages/co-template-core/tsconfig.json',
 	'extensions/co-template-generator/tsconfig.json',
 	'extensions/css-language-features/client/tsconfig.json',
 	'extensions/css-language-features/server/tsconfig.json',

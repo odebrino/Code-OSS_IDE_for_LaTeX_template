@@ -11,6 +11,7 @@ extensions/**/dist/
 src/vs/base/browser/ui/codicons/codicon/codicon.ttf
 /out*/
 /extensions/**/out/
+/packages/**/out/
 build/node_modules
 coverage/
 test_data/

@@ -2,6 +2,15 @@
 
 This is a CO-branded fork of Code-OSS with LaTeX Workshop embedded.
 
+## CO Layout
+- `packages/co-template-core`: Shared template contract, validation, renderer, and build service.
+- `extensions/co-shell`: CO Shell + Diagramador UI.
+- `extensions/co-template-generator`: Template Generator UI.
+
+## CO Tests
+- Build core: `npx tsc -p packages/co-template-core/tsconfig.json`
+- Run core tests: `node node_modules/.bin/mocha --ui tdd packages/co-template-core/out/test/template-core.test.js`
+
 ## Requirements
 - Node 22.x (see `.nvmrc`)
 - Python 3

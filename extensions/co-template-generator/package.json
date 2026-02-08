@@ -17,7 +17,7 @@
 		"onCommand:co.templateGenerator.open"
 	],
 	"dependencies": {
-		"co-template-core": "file:../co-template-core",
+		"co-template-core": "file:../../packages/co-template-core",
 		"yazl": "^2.5.1"
 	},
 	"devDependencies": {
