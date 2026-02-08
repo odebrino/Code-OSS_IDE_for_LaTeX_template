@@ -42,7 +42,7 @@
 		"viewsContainers": {
 			"activitybar": [
 				{
-					"id": "co.templateGenerator",
+					"id": "co-template-generator",
 					"title": "Templates",
 					"icon": "resources/co-view.svg",
 					"when": "co.cozitos != true"
@@ -50,7 +50,7 @@
 			]
 		},
 		"views": {
-			"co.templateGenerator": [
+			"co-template-generator": [
 				{
 					"id": "co.templateGenerator.mainView",
 					"name": "Gerador de Template",

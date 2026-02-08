@@ -147,7 +147,7 @@ class TemplateGeneratorController implements vscode.Disposable {
 
 	async open() {
 		try {
-			await vscode.commands.executeCommand('workbench.view.extension.co.templateGenerator');
+			await vscode.commands.executeCommand('workbench.view.extension.co-template-generator');
 		} catch {
 			// best effort
 		}
