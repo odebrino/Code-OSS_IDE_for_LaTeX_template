@@ -31,7 +31,7 @@ const DEFAULT_TEMPLATE_SOURCE = String.raw`\documentclass[12pt]{article}
 \begin{document}
 \section*{{title}}
 
-\textbf{Integrantes}\
+\textbf{Integrantes}\\
 {{members}}
 
 \end{document}`;
@@ -322,6 +322,10 @@ class TemplateGeneratorController implements vscode.Disposable {
 		}
 
 		const current = this.currentTemplate;
+		if (current?.readOnly && (!previousId || previousId === current.manifest.id)) {
+			this.viewProvider?.sendError('Template somente leitura. Duplique para editar.');
+			return;
+		}
 		if (previousId && previousId !== targetId && current && !current.readOnly) {
 			const oldDir = path.join(this.templateStorage.primaryDir, previousId);
 			const newDir = path.join(this.templateStorage.primaryDir, targetId);

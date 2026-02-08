@@ -276,6 +276,23 @@ function getTemplateGeneratorHtml(webview: vscode.Webview, state: TemplateGenera
 		margin-bottom: 6px;
 	}
 	.schema-row button { padding: 4px 8px; }
+	.preview-form {
+		display: grid;
+		gap: 8px;
+		margin-bottom: 8px;
+	}
+	.preview-row {
+		display: grid;
+		gap: 4px;
+	}
+	.preview-row.inline {
+		grid-template-columns: 1fr auto;
+		align-items: center;
+	}
+	.preview-row label {
+		font-size: 11px;
+		color: var(--muted);
+	}
 	.hint {
 		font-size: 11px;
 		color: var(--muted);
@@ -329,6 +346,8 @@ function getTemplateGeneratorHtml(webview: vscode.Webview, state: TemplateGenera
 
 	<section class="card">
 		<h2>Preview data</h2>
+		<div id="previewForm" class="preview-form"></div>
+		<label for="previewData">JSON</label>
 		<textarea id="previewData"></textarea>
 		<div class="hint">JSON usado para gerar o preview.</div>
 		<div id="previewError" class="error-line"></div>
@@ -363,6 +382,7 @@ function getTemplateGeneratorHtml(webview: vscode.Webview, state: TemplateGenera
 	const descriptionInput = document.getElementById('templateDescription');
 	const schemaList = document.getElementById('schemaList');
 	const addSchema = document.getElementById('addSchema');
+	const previewForm = document.getElementById('previewForm');
 	const previewDataInput = document.getElementById('previewData');
 	const previewError = document.getElementById('previewError');
 	const mainTexInput = document.getElementById('mainTex');
@@ -496,6 +516,89 @@ function getTemplateGeneratorHtml(webview: vscode.Webview, state: TemplateGenera
 		});
 	}
 
+	function renderPreviewForm() {
+		previewForm.innerHTML = '';
+		const template = state.template;
+		if (!template) {
+			return;
+		}
+		const schema = Array.isArray(template.manifest.schema) ? template.manifest.schema : [];
+		if (!schema.length) {
+			const hint = document.createElement('div');
+			hint.className = 'hint';
+			hint.textContent = 'Sem campos no schema.';
+			previewForm.appendChild(hint);
+			return;
+		}
+		const previewData = template.previewData && typeof template.previewData === 'object' && !Array.isArray(template.previewData)
+			? template.previewData
+			: {};
+		schema.forEach((field, index) => {
+			const row = document.createElement('div');
+			const inputId = 'preview-field-' + index;
+			const key = field.key || '';
+			const label = document.createElement('label');
+			label.textContent = field.label || key || 'campo';
+			label.htmlFor = inputId;
+			const type = field.type || 'string';
+
+			if (type === 'boolean') {
+				row.className = 'preview-row inline';
+				const input = document.createElement('input');
+				input.type = 'checkbox';
+				input.id = inputId;
+				input.checked = Boolean(previewData[key]);
+				input.addEventListener('change', () => {
+					setPreviewValue(key, input.checked);
+				});
+				row.appendChild(label);
+				row.appendChild(input);
+				previewForm.appendChild(row);
+				return;
+			}
+
+			row.className = 'preview-row';
+			row.appendChild(label);
+
+			if (type === 'string[]') {
+				const input = document.createElement('textarea');
+				input.id = inputId;
+				const raw = previewData[key];
+				const lines = Array.isArray(raw) ? raw : (typeof raw === 'string' ? raw.split(/\r?\n/) : []);
+				input.value = lines.join('\n');
+				input.addEventListener('input', () => {
+					const items = input.value.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+					setPreviewValue(key, items);
+				});
+				row.appendChild(input);
+			} else if (type === 'number') {
+				const input = document.createElement('input');
+				input.id = inputId;
+				input.type = 'number';
+				input.step = 'any';
+				const raw = previewData[key];
+				input.value = typeof raw === 'number' && Number.isFinite(raw) ? String(raw) : '';
+				input.addEventListener('input', () => {
+					const value = input.value.trim();
+					const parsed = value === '' ? null : Number(value);
+					setPreviewValue(key, Number.isFinite(parsed as number) ? parsed : value);
+				});
+				row.appendChild(input);
+			} else {
+				const input = document.createElement('input');
+				input.id = inputId;
+				input.type = 'text';
+				input.value = previewData[key] ? String(previewData[key]) : '';
+				input.addEventListener('input', () => {
+					setPreviewValue(key, input.value);
+				});
+				row.appendChild(input);
+			}
+
+			previewForm.appendChild(row);
+		});
+	}
+
 	function renderPreviewData() {
 		const template = state.template;
 		if (!template) {
@@ -519,8 +622,14 @@ function getTemplateGeneratorHtml(webview: vscode.Webview, state: TemplateGenera
 		deleteButton.disabled = readOnly || !template;
 		duplicateButton.disabled = !template;
 		exportButton.disabled = !template;
-		const formDisabled = !template;
+		const formDisabled = !template || readOnly;
 		[nameInput, idInput, versionInput, descriptionInput, addSchema, previewDataInput, mainTexInput].forEach(control => {
+			control.disabled = formDisabled;
+		});
+		schemaList.querySelectorAll('input, textarea, select, button').forEach(control => {
+			control.disabled = formDisabled;
+		});
+		previewForm.querySelectorAll('input, textarea, select').forEach(control => {
 			control.disabled = formDisabled;
 		});
 	}
@@ -535,9 +644,28 @@ function getTemplateGeneratorHtml(webview: vscode.Webview, state: TemplateGenera
 		}
 		renderMetadata();
 		renderSchema();
+		renderPreviewForm();
 		renderPreviewData();
 		renderMainTex();
 		renderReadOnly();
+	}
+
+	function setPreviewValue(key, value) {
+		if (!key) {
+			return;
+		}
+		if (!state.template) {
+			return;
+		}
+		const previewData = state.template.previewData && typeof state.template.previewData === 'object' && !Array.isArray(state.template.previewData)
+			? state.template.previewData
+			: {};
+		previewData[key] = value;
+		state.template.previewData = previewData;
+		previewDataValid = true;
+		setPreviewError('');
+		previewDataInput.value = JSON.stringify(previewData, null, 2);
+		scheduleSave();
 	}
 
 	function scheduleSave() {
@@ -664,6 +792,7 @@ function getTemplateGeneratorHtml(webview: vscode.Webview, state: TemplateGenera
 		state.template.manifest.schema = schema;
 		scheduleSave();
 		renderSchema();
+		renderPreviewForm();
 	});
 
 	previewDataInput.addEventListener('input', () => {
@@ -675,6 +804,7 @@ function getTemplateGeneratorHtml(webview: vscode.Webview, state: TemplateGenera
 			state.template.previewData = parsed;
 			previewDataValid = true;
 			setPreviewError('');
+			renderPreviewForm();
 			scheduleSave();
 		} catch (err) {
 			previewDataValid = false;

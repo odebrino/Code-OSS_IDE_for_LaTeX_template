@@ -457,7 +457,13 @@ function normalizeTemplateData(data: Record<string, any>) {
 
 function formatTemplateValue(value: any): string {
 	if (Array.isArray(value)) {
-		return value.map(entry => escapeLatexBlock(String(entry ?? ''))).join('\\');
+		return value.map(entry => escapeLatexBlock(String(entry ?? ''))).join('\\\\');
+	}
+	if (typeof value === 'number') {
+		return Number.isFinite(value) ? String(value) : '';
+	}
+	if (typeof value === 'boolean') {
+		return value ? 'true' : 'false';
 	}
 	if (value === null || value === undefined) {
 		return '';
