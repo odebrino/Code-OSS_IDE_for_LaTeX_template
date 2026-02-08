@@ -78,13 +78,11 @@ export type TemplateBuildRequest = {
 	previewData: Record<string, any>;
 	outDir: string;
 	fast?: boolean;
-	usePreviewTex?: boolean;
 };
 
 export type BuildPreviewOptions = {
 	onProcess?: (child: ChildProcess) => void;
 	fast?: boolean;
-	usePreviewTex?: boolean;
 };
 
 const DEFAULT_SHARED_STORAGE = 'co-template-core';
@@ -241,8 +239,7 @@ export async function buildPreview(
 ): Promise<TemplateBuildResult> {
 	await fs.mkdir(outDir, { recursive: true });
 	const data = mergeTemplateData(template.manifest.defaults, previewData);
-	const source = await resolveTemplateSource(template, options);
-	const tex = renderTemplate(source, data);
+	const tex = renderTemplate(template.mainTex, data);
 	const texPath = path.join(outDir, 'preview.tex');
 	const previousTex = await readTextFile(texPath);
 	const texChanged = previousTex !== tex;
@@ -331,8 +328,7 @@ export class TemplateBuildService {
 				onProcess: (child) => {
 					this.currentProcess = child;
 				},
-				fast: request.fast,
-				usePreviewTex: request.usePreviewTex
+				fast: request.fast
 			});
 			if (buildId !== this.buildId) {
 				return;
@@ -479,18 +475,6 @@ async function readTextFile(filePath: string): Promise<string | undefined> {
 function mergeTemplateData(defaults: Record<string, any> | undefined, previewData: Record<string, any>): Record<string, any> {
 	const base = defaults && typeof defaults === 'object' && !Array.isArray(defaults) ? defaults : {};
 	return { ...base, ...previewData };
-}
-
-async function resolveTemplateSource(template: TemplatePackage, options?: BuildPreviewOptions): Promise<string> {
-	if (!options?.usePreviewTex) {
-		return template.mainTex;
-	}
-	const previewPath = path.join(template.dir, 'preview.tex');
-	const previewText = await readTextFile(previewPath);
-	if (previewText && previewText.trim()) {
-		return previewText;
-	}
-	return template.mainTex;
 }
 
 function normalizeTemplateData(data: Record<string, any>) {
