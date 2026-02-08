@@ -164,6 +164,107 @@ left=4mm,right=4mm,top=3mm,bottom=3mm,
 
 \end{document}`;
 
+export const TEMPLATE_TEST_V0_PREVIEW = String.raw`\documentclass[12pt]{article}
+
+% ========= Pagina =========
+\usepackage[a4paper,left=3cm,right=3cm,top=0.75cm,bottom=2.5cm]{geometry}
+\usepackage[brazil]{babel}
+\usepackage{graphicx}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+
+\pagestyle{empty}
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{6pt}
+
+% ========= Fonte (depois do titulo) =========
+\newcommand{\comic}{\sffamily}
+
+% ========= Variaveis =========
+\newcommand{\HeaderImage}{assets/modelo_header_image1.jpg}
+\newcommand{\TaskNumber}{XX}
+
+\newcommand{\DivulgDate}{00/04/2020}
+\newcommand{\DivulgTime}{As 00h00min}
+\newcommand{\DivulgLocal}{Q.G. da C.O.}
+
+\newcommand{\CumprDate}{00/04/2020}
+\newcommand{\CumprTime}{Ate as 00h00min}
+\newcommand{\CumprLocal}{Q.G. da C.O.}
+
+\newcommand{\NextDate}{00/04/2020}
+\newcommand{\NextTime}{As 00h00min}
+\newcommand{\NextLocal}{Q.G. da C.O.}
+
+\newcommand{\TaskBodyHeight}{6cm}
+\newcommand{\TaskBody}{}
+
+% ========= Caixas =========
+\newcommand{\FrameBox}[2]{%
+\fbox{\parbox[t][#1][t]{\dimexpr\linewidth-2\fboxsep-2\fboxrule\relax}{#2}}}
+
+% ========= Helpers =========
+\newcommand{\InfoRow}[3]{%
+\begin{tabular*}{\textwidth}{@{\extracolsep{\fill}}lll}
+\textbf{Data:} #1 & \textbf{Hora:} #2 & \textbf{Local:} #3
+\end{tabular*}\par
+}
+
+\begin{document}
+
+% ========= Cabecalho (imagem) =========
+\begin{center}
+\includegraphics[width=\textwidth]{\HeaderImage}
+\end{center}
+\vspace{0.35cm}
+
+% ========= Titulo =========
+\begin{center}
+{\LARGE\bfseries Tarefa \TaskNumber}
+\end{center}
+
+% ======== A PARTIR DAQUI: Sans =========
+\comic
+
+% ========= Divulgacao =========
+\textbf{Divulgacao:}\par
+\InfoRow{\DivulgDate}{\DivulgTime}{\DivulgLocal}
+
+% 1o retangulo (vazio)
+\FrameBox{\TaskBodyHeight}{\TaskBody}
+
+\vspace{0.6cm}
+
+% ========= Cumprimento =========
+\textbf{Cumprimento:}\par
+\InfoRow{\CumprDate}{\CumprTime}{\CumprLocal}
+
+\textbf{Criterio de avaliacao:}\par
+-\par
+
+\textbf{Pontuacao:}\par
+-\par
+
+\vspace{0.8cm}
+
+% ========= Proxima tarefa =========
+\textbf{Divulgacao da proxima tarefa:}\par
+\InfoRow{\NextDate}{\NextTime}{\NextLocal}
+
+\vspace{0.8cm}
+
+% ========= Patrocinadores =========
+\textbf{PATROCINADORES:}\par
+\FrameBox{3.5cm}{}
+
+\vspace{0.8cm}
+
+% ========= Alimento =========
+\textbf{ALIMENTO}\par
+
+\end{document}`;
+
 export function createDefaultProject(): DiagramadorProject {
 	return {
 		templateId: DEFAULT_TEMPLATE_ID,

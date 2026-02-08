@@ -27,6 +27,7 @@ import {
 	DiagramadorProject,
 	parseProject,
 	TEMPLATE_TEST_V0,
+	TEMPLATE_TEST_V0_PREVIEW,
 	serializeProject
 } from './diagramador';
 import { DiagramadorStatus, DiagramadorViewProvider, registerDiagramadorView } from './webview';
@@ -243,7 +244,8 @@ class DiagramadorController implements vscode.Disposable {
 			template,
 			previewData,
 			outDir: this.paths.outDir,
-			fast: true
+			fast: true,
+			usePreviewTex: true
 		});
 	}
 
@@ -270,6 +272,7 @@ class DiagramadorController implements vscode.Disposable {
 		if (existing) {
 			await this.ensureHeaderImage(existing);
 			await this.ensureOptimizedFontBlock(existing);
+			await this.ensurePreviewTemplate(existing);
 			return;
 		}
 		const defaults = {
@@ -315,8 +318,24 @@ class DiagramadorController implements vscode.Disposable {
 				previewData: defaults
 			});
 			await fs.copyFile(this.headerImagePath, path.join(template.assetsDir, this.headerImageName));
+			await this.ensurePreviewTemplate(template);
 		} catch (err: any) {
 			this.output.appendLine(`[${new Date().toISOString()}] Falha ao criar template padrao: ${err?.message ?? err}`);
+		}
+	}
+
+	private async ensurePreviewTemplate(template: TemplatePackage) {
+		if (template.readOnly || template.manifest.id !== DEFAULT_TEMPLATE_ID) {
+			return;
+		}
+		const previewPath = path.join(template.dir, 'preview.tex');
+		if (await fileExists(previewPath)) {
+			return;
+		}
+		try {
+			await fs.writeFile(previewPath, TEMPLATE_TEST_V0_PREVIEW, 'utf8');
+		} catch (err: any) {
+			this.output.appendLine(`[${new Date().toISOString()}] Falha ao criar preview leve: ${err?.message ?? err}`);
 		}
 	}
 
