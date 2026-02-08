@@ -88,7 +88,6 @@ function isCozitosEnabled(): boolean {
 }
 
 class TemplateGeneratorController implements vscode.Disposable {
-	private static readonly AUTO_COMPILE_KEY = 'co.templateGenerator.autoCompile';
 	private viewProvider?: TemplateGeneratorViewProvider;
 	private templates: TemplateSummary[] = [];
 	private currentTemplate?: TemplatePackage;
@@ -98,12 +97,10 @@ class TemplateGeneratorController implements vscode.Disposable {
 	private readonly output: vscode.OutputChannel;
 	private previewPanel?: vscode.WebviewPanel;
 	private initialized = false;
-	private autoCompile = true;
 	private bundlePath?: string;
 
 	constructor(private readonly context: vscode.ExtensionContext) {
 		this.output = vscode.window.createOutputChannel('Gerador de Template');
-		this.autoCompile = context.globalState.get<boolean>(TemplateGeneratorController.AUTO_COMPILE_KEY) ?? true;
 		this.templateStorage = resolveTemplateStoragePaths(
 			context.globalStorageUri.fsPath,
 			path.resolve(context.extensionPath, '..', '..')
@@ -144,10 +141,7 @@ class TemplateGeneratorController implements vscode.Disposable {
 					previewData: this.currentTemplate.previewData,
 					readOnly: this.currentTemplate.readOnly
 				}
-				: undefined,
-			settings: {
-				autoCompile: this.autoCompile
-			}
+				: undefined
 		};
 	}
 
@@ -192,12 +186,6 @@ class TemplateGeneratorController implements vscode.Disposable {
 				return;
 			case 'saveTemplate':
 				await this.saveTemplateDraft(message?.draft, message?.previousId);
-				return;
-			case 'setAutoCompile':
-				await this.setAutoCompile(message?.value);
-				return;
-			case 'buildNow':
-				await this.buildNow();
 				return;
 			default:
 				return;
@@ -373,10 +361,6 @@ class TemplateGeneratorController implements vscode.Disposable {
 		if (!this.currentTemplate) {
 			return;
 		}
-		if (!this.autoCompile) {
-			this.viewProvider?.sendStatus({ state: 'idle', message: 'Compilacao manual.' });
-			return;
-		}
 		const outDir = path.join(this.previewRoot, this.currentTemplate.manifest.id);
 		this.buildService.schedule({
 			template: this.currentTemplate,
@@ -384,34 +368,6 @@ class TemplateGeneratorController implements vscode.Disposable {
 			outDir,
 			fast: true
 		});
-	}
-
-	private async buildNow() {
-		if (!this.currentTemplate) {
-			return;
-		}
-		const outDir = path.join(this.previewRoot, this.currentTemplate.manifest.id);
-		this.buildService.buildNow({
-			template: this.currentTemplate,
-			previewData: this.currentTemplate.previewData ?? {},
-			outDir,
-			fast: false
-		});
-	}
-
-	private async setAutoCompile(value: any) {
-		const next = Boolean(value);
-		if (this.autoCompile === next) {
-			return;
-		}
-		this.autoCompile = next;
-		await this.context.globalState.update(TemplateGeneratorController.AUTO_COMPILE_KEY, next);
-		this.viewProvider?.sendState(this.getState());
-		if (this.autoCompile) {
-			await this.scheduleBuild();
-		} else {
-			this.viewProvider?.sendStatus({ state: 'idle', message: 'Compilacao manual.' });
-		}
 	}
 
 	private async resolveBundlePath() {

@@ -302,16 +302,6 @@ export class TemplateBuildService {
 		}, this.debounceMs);
 	}
 
-	buildNow(request: TemplateBuildRequest) {
-		this.pending = request;
-		this.cancelRunning();
-		if (this.timer) {
-			clearTimeout(this.timer);
-			this.timer = undefined;
-		}
-		void this.runBuild();
-	}
-
 	dispose() {
 		if (this.timer) {
 			clearTimeout(this.timer);

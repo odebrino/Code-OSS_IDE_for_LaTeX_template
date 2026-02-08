@@ -81,7 +81,6 @@ const OPTIMIZED_FONT_BLOCK = String.raw`% ========= Fonte (depois do titulo) ===
 % ========= Variaveis =========`;
 
 class DiagramadorController implements vscode.Disposable {
-	private static readonly AUTO_COMPILE_KEY = 'co.diagramador.autoCompile';
 	private project: DiagramadorProject = createDefaultProject();
 	private readonly paths: DiagramadorPaths;
 	private viewProvider?: DiagramadorViewProvider;
@@ -94,13 +93,11 @@ class DiagramadorController implements vscode.Disposable {
 	private templates: TemplateSummary[] = [];
 	private readonly templateCache = new Map<string, TemplatePackage>();
 	private initialized = false;
-	private autoCompile = true;
 	private bundlePath?: string;
 
 	constructor(private readonly context: vscode.ExtensionContext) {
 		const extensionRoot = context.extensionUri.fsPath;
 		const globalStoragePath = context.globalStorageUri.fsPath;
-		this.autoCompile = context.globalState.get<boolean>(DiagramadorController.AUTO_COMPILE_KEY) ?? true;
 		this.paths = resolveDiagramadorPaths();
 		this.output = vscode.window.createOutputChannel('Diagramador');
 		this.headerImagePath = path.join(extensionRoot, 'resources', this.headerImageName);
@@ -122,7 +119,6 @@ class DiagramadorController implements vscode.Disposable {
 		this.initialized = true;
 		this.viewProvider?.sendProject(this.project);
 		this.viewProvider?.sendTemplates(this.templates);
-		this.viewProvider?.sendConfig({ autoCompile: this.autoCompile });
 		if (selectionChanged) {
 			await saveDiagramadorProject(this.paths, this.project);
 		}
@@ -134,7 +130,6 @@ class DiagramadorController implements vscode.Disposable {
 		if (this.initialized) {
 			this.viewProvider.sendProject(this.project);
 			this.viewProvider.sendTemplates(this.templates);
-			this.viewProvider.sendConfig({ autoCompile: this.autoCompile });
 		}
 	}
 
@@ -158,19 +153,12 @@ class DiagramadorController implements vscode.Disposable {
 			case 'ready':
 				this.viewProvider?.sendProject(this.project);
 				this.viewProvider?.sendTemplates(this.templates);
-				this.viewProvider?.sendConfig({ autoCompile: this.autoCompile });
 				return;
 			case 'updateTemplate':
 				await this.updateTemplate(message?.templateId);
 				return;
 			case 'updateDoc':
 				await this.updateDoc(message?.patch);
-				return;
-			case 'setAutoCompile':
-				await this.setAutoCompile(message?.value);
-				return;
-			case 'buildNow':
-				await this.buildNow();
 				return;
 			default:
 				return;
@@ -245,10 +233,6 @@ class DiagramadorController implements vscode.Disposable {
 	}
 
 	private async scheduleBuild() {
-		if (!this.autoCompile) {
-			this.handleStatus({ state: 'idle', message: 'Compilacao manual.' });
-			return;
-		}
 		const template = await this.getTemplatePackage(this.project.templateId);
 		if (!template) {
 			this.handleStatus({ state: 'error', message: 'Template nao encontrado.' });
@@ -261,36 +245,6 @@ class DiagramadorController implements vscode.Disposable {
 			outDir: this.paths.outDir,
 			fast: true
 		});
-	}
-
-	private async buildNow() {
-		const template = await this.getTemplatePackage(this.project.templateId);
-		if (!template) {
-			this.handleStatus({ state: 'error', message: 'Template nao encontrado.' });
-			return;
-		}
-		const previewData = createTemplateData(this.project);
-		this.buildService.buildNow({
-			template,
-			previewData,
-			outDir: this.paths.outDir,
-			fast: false
-		});
-	}
-
-	private async setAutoCompile(value: any) {
-		const next = Boolean(value);
-		if (this.autoCompile === next) {
-			return;
-		}
-		this.autoCompile = next;
-		await this.context.globalState.update(DiagramadorController.AUTO_COMPILE_KEY, next);
-		this.viewProvider?.sendConfig({ autoCompile: this.autoCompile });
-		if (this.autoCompile) {
-			await this.scheduleBuild();
-		} else {
-			this.handleStatus({ state: 'idle', message: 'Compilacao manual.' });
-		}
 	}
 
 	private async refreshTemplates(): Promise<boolean> {

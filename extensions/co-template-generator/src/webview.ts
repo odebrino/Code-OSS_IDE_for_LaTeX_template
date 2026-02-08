@@ -34,9 +34,6 @@ export type TemplateGeneratorState = {
 		previewData: Record<string, any>;
 		readOnly: boolean;
 	};
-	settings?: {
-		autoCompile: boolean;
-	};
 };
 
 export type MessageHandler = (message: any, webview: vscode.Webview) => void | Promise<void>;
@@ -245,23 +242,6 @@ function getTemplateGeneratorHtml(webview: vscode.Webview, state: TemplateGenera
 		gap: 6px;
 		margin-top: 8px;
 	}
-	.compile-actions {
-		display: flex;
-		align-items: center;
-		gap: 8px;
-		flex-wrap: wrap;
-		margin-top: 8px;
-	}
-	.toggle-row {
-		display: inline-flex;
-		align-items: center;
-		gap: 6px;
-		font-size: 12px;
-	}
-	.toggle-row input {
-		width: auto;
-		margin: 0;
-	}
 	.row {
 		display: grid;
 		grid-template-columns: 1fr 120px 1fr auto;
@@ -337,13 +317,6 @@ function getTemplateGeneratorHtml(webview: vscode.Webview, state: TemplateGenera
 			<button id="deleteTemplate" class="ghost" type="button">Excluir</button>
 			<button id="exportTemplate" class="secondary" type="button">Exportar</button>
 		</div>
-		<div class="compile-actions">
-			<label class="toggle-row">
-				<input id="autoCompileToggle" type="checkbox" />
-				Auto-compilar
-			</label>
-			<button id="buildNow" class="secondary" type="button">Gerar PDF</button>
-		</div>
 		<div class="status" id="buildStatus" data-state="idle"></div>
 	</section>
 
@@ -395,7 +368,6 @@ function getTemplateGeneratorHtml(webview: vscode.Webview, state: TemplateGenera
 	let idValid = true;
 	let lastTemplateId = state.template ? state.template.manifest.id : '';
 	let saveTimer;
-	let autoCompile = state.settings ? Boolean(state.settings.autoCompile) : true;
 
 	const templateSelect = document.getElementById('templateSelect');
 	const newButton = document.getElementById('newTemplate');
@@ -404,8 +376,6 @@ function getTemplateGeneratorHtml(webview: vscode.Webview, state: TemplateGenera
 	const exportButton = document.getElementById('exportTemplate');
 	const statusEl = document.getElementById('buildStatus');
 	const readOnlyBadge = document.getElementById('readOnlyBadge');
-	const autoCompileToggle = document.getElementById('autoCompileToggle');
-	const buildNowButton = document.getElementById('buildNow');
 	const nameInput = document.getElementById('templateName');
 	const idInput = document.getElementById('templateId');
 	const versionInput = document.getElementById('templateVersion');
@@ -445,7 +415,6 @@ function getTemplateGeneratorHtml(webview: vscode.Webview, state: TemplateGenera
 			idValid = true;
 			setError('');
 		}
-		autoCompile = state.settings ? Boolean(state.settings.autoCompile) : true;
 		render();
 	}
 
@@ -653,7 +622,6 @@ function getTemplateGeneratorHtml(webview: vscode.Webview, state: TemplateGenera
 		deleteButton.disabled = readOnly || !template;
 		duplicateButton.disabled = !template;
 		exportButton.disabled = !template;
-		buildNowButton.disabled = !template;
 		const formDisabled = !template || readOnly;
 		[nameInput, idInput, versionInput, descriptionInput, addSchema, previewDataInput, mainTexInput].forEach(control => {
 			control.disabled = formDisabled;
@@ -664,7 +632,6 @@ function getTemplateGeneratorHtml(webview: vscode.Webview, state: TemplateGenera
 		previewForm.querySelectorAll('input, textarea, select').forEach(control => {
 			control.disabled = formDisabled;
 		});
-		autoCompileToggle.checked = autoCompile;
 	}
 
 	function render() {
@@ -763,15 +730,6 @@ function getTemplateGeneratorHtml(webview: vscode.Webview, state: TemplateGenera
 
 	exportButton.addEventListener('click', () => {
 		vscode.postMessage({ type: 'exportTemplate' });
-	});
-
-	autoCompileToggle.addEventListener('change', () => {
-		autoCompile = autoCompileToggle.checked;
-		vscode.postMessage({ type: 'setAutoCompile', value: autoCompile });
-	});
-
-	buildNowButton.addEventListener('click', () => {
-		vscode.postMessage({ type: 'buildNow' });
 	});
 
 	nameInput.addEventListener('input', () => {

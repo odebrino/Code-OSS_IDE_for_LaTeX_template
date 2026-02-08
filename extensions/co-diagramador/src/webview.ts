@@ -22,10 +22,6 @@ export type DiagramadorTemplateSummary = {
 	description?: string;
 };
 
-export type DiagramadorConfig = {
-	autoCompile: boolean;
-};
-
 export class DiagramadorViewProvider implements vscode.WebviewViewProvider {
 	private view?: vscode.WebviewView;
 	private readonly uiBuildId: string;
@@ -69,10 +65,6 @@ export class DiagramadorViewProvider implements vscode.WebviewViewProvider {
 
 	sendStatus(status: DiagramadorStatus) {
 		this.view?.webview.postMessage({ type: 'status', status });
-	}
-
-	sendConfig(config: DiagramadorConfig) {
-		this.view?.webview.postMessage({ type: 'config', config });
 	}
 
 	show(preserveFocus = true) {
@@ -207,22 +199,6 @@ function getDiagramadorHtml(
 		color: #666;
 		margin-top: 6px;
 	}
-	.preview-actions {
-		display: flex;
-		align-items: center;
-		gap: 8px;
-		flex-wrap: wrap;
-	}
-	.toggle-row {
-		display: inline-flex;
-		align-items: center;
-		gap: 6px;
-		font-size: 12px;
-	}
-	.toggle-row input {
-		width: auto;
-		margin: 0;
-	}
 	.section {
 		margin-top: 12px;
 	}
@@ -280,18 +256,6 @@ function getDiagramadorHtml(
 	</section>
 
 	<section class="card">
-		<h2>Preview</h2>
-		<div class="preview-actions">
-			<label class="toggle-row">
-				<input id="autoCompileToggle" type="checkbox" />
-				Auto-compilar
-			</label>
-			<button id="buildNow" class="secondary" type="button">Gerar PDF</button>
-		</div>
-		<div class="hint">Desative o auto para editar sem recompilar a cada tecla.</div>
-	</section>
-
-	<section class="card">
 		<h2>Dados do Documento</h2>
 		<label for="doc-title">Titulo</label>
 		<input id="doc-title" type="text" />
@@ -334,9 +298,6 @@ function getDiagramadorHtml(
 	const addMemberBtn = document.getElementById('addMember');
 	const keywordsList = document.getElementById('keywordsList');
 	const keywordInput = document.getElementById('keywordInput');
-	const autoCompileToggle = document.getElementById('autoCompileToggle');
-	const buildNowBtn = document.getElementById('buildNow');
-	let autoCompile = true;
 
 	function setTemplates(next) {
 		templates = Array.isArray(next) ? next : [];
@@ -379,14 +340,6 @@ function getDiagramadorHtml(
 		}
 		statusEl.textContent = status.message || '';
 		statusEl.dataset.state = status.state || 'idle';
-	}
-
-	function setConfig(config) {
-		if (!config || typeof config.autoCompile !== 'boolean') {
-			return;
-		}
-		autoCompile = config.autoCompile;
-		autoCompileToggle.checked = autoCompile;
 	}
 
 	function ensureDoc() {
@@ -539,15 +492,6 @@ function getDiagramadorHtml(
 		renderMembers();
 	});
 
-	autoCompileToggle.addEventListener('change', () => {
-		autoCompile = autoCompileToggle.checked;
-		vscode.postMessage({ type: 'setAutoCompile', value: autoCompile });
-	});
-
-	buildNowBtn.addEventListener('click', () => {
-		vscode.postMessage({ type: 'buildNow' });
-	});
-
 	keywordInput.addEventListener('keydown', (event) => {
 		if (event.key !== 'Enter') {
 			return;
@@ -587,9 +531,6 @@ function getDiagramadorHtml(
 		}
 		if (msg.type === 'status') {
 			setStatus(msg.status);
-		}
-		if (msg.type === 'config') {
-			setConfig(msg.config);
 		}
 	});
 
