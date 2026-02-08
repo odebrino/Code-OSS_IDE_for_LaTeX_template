@@ -16,6 +16,12 @@
 		"onView:co.templateGenerator.mainView",
 		"onCommand:co.templateGenerator.open"
 	],
+	"capabilities": {
+		"virtualWorkspaces": true,
+		"untrustedWorkspaces": {
+			"supported": true
+		}
+	},
 	"dependencies": {
 		"co-template-core": "file:../../packages/co-template-core",
 		"yazl": "^2.5.1"
