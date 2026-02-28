@@ -1,0 +1,63 @@
+{
+	"name": "co-data-set",
+	"displayName": "Data Set",
+	"description": "Visualizador de data sets para CO",
+	"icon": "resources/co-view.svg",
+	"publisher": "odebrino",
+	"version": "0.0.1",
+	"license": "MIT",
+	"engines": {
+		"vscode": "^1.90.0"
+	},
+	"categories": [
+		"Other"
+	],
+	"main": "./out/extension.js",
+	"dependencies": {
+		"co-doc-core": "file:../../packages/co-doc-core"
+	},
+	"activationEvents": [
+		"onView:co.dataSet.mainView",
+		"onCommand:co.dataSet.open",
+		"onCommand:co.dataSet.refresh"
+	],
+	"capabilities": {
+		"virtualWorkspaces": true,
+		"untrustedWorkspaces": {
+			"supported": true
+		}
+	},
+	"devDependencies": {
+		"@types/node": "^22.18.10"
+	},
+	"contributes": {
+		"commands": [
+			{ "command": "co.dataSet.open", "title": "CO: Abrir Data Set" },
+			{ "command": "co.dataSet.refresh", "title": "CO: Atualizar Data Set" }
+		],
+		"menus": {
+			"commandPalette": [
+				{ "command": "co.dataSet.open" },
+				{ "command": "co.dataSet.refresh" }
+			]
+		},
+		"viewsContainers": {
+			"activitybar": [
+				{
+					"id": "co-data-set",
+					"title": "Data Set",
+					"icon": "resources/co-view.svg"
+				}
+			]
+		},
+		"views": {
+			"co-data-set": [
+				{
+					"id": "co.dataSet.mainView",
+					"name": "Data Set",
+					"type": "webview"
+				}
+			]
+		}
+	}
+}

@@ -34,10 +34,10 @@ suite('Template Core', () => {
 		assert.strictEqual(badSlash.ok, false);
 	});
 
-	test('renderTemplate substitui placeholders e newcommand', () => {
+	test('renderTemplate substitui placeholders sem alterar newcommand', () => {
 		const source = String.raw`\newcommand{\Title}{OLD}\section*{ {{Title}} }`;
 		const output = renderTemplate(source, { Title: 'Novo' });
-		assert.ok(output.includes('\\newcommand{\\Title}{Novo}'));
+		assert.ok(output.includes('\\newcommand{\\Title}{OLD}'));
 		assert.ok(output.includes('\\section*{ Novo }'));
 	});
 
@@ -47,7 +47,45 @@ suite('Template Core', () => {
 		assert.ok(output.includes('A\\\\B'));
 	});
 
-	test('buildPreview grava preview.tex mesmo com falha no tectonic', async () => {
+	test('buildPreview preserva campos latex sem escape', async () => {
+		const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'co-template-core-'));
+		const outDir = path.join(tempRoot, 'out');
+		const assetsDir = path.join(tempRoot, 'assets');
+		await fs.mkdir(assetsDir, { recursive: true });
+		const manifest: TemplateManifest = {
+			id: 'demo-latex',
+			name: 'Demo Latex',
+			version: '1.0.0',
+			description: 'Demo template',
+			entry: 'main.tex',
+			schema: [{ key: 'Body', type: 'latex', label: 'Body' }]
+		};
+		const template: TemplatePackage = {
+			manifest,
+			dir: tempRoot,
+			entryPath: path.join(tempRoot, 'main.tex'),
+			assetsDir,
+			mainTex: String.raw`\\documentclass{article}\\begin{document}\\input{co_data.tex}\\Body\\end{document}`,
+			previewData: {},
+			readOnly: false
+		};
+		const prev = process.env.TECTONIC_PATH;
+		process.env.TECTONIC_PATH = '__missing_tectonic__';
+		try {
+			await buildPreview(template, { Body: '\\textbf{A} & B' }, outDir);
+			const dataTex = await fs.readFile(path.join(outDir, 'co_data.tex'), 'utf8');
+			assert.ok(dataTex.includes('\\def\\Body{\\textbf{A} & B}'));
+		} finally {
+			if (prev === undefined) {
+				delete process.env.TECTONIC_PATH;
+			} else {
+				process.env.TECTONIC_PATH = prev;
+			}
+			await fs.rm(tempRoot, { recursive: true, force: true });
+		}
+	});
+
+	test('buildPreview grava main.tex e co_data.tex mesmo com falha no tectonic', async () => {
 		const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'co-template-core-'));
 		const outDir = path.join(tempRoot, 'out');
 		const assetsDir = path.join(tempRoot, 'assets');
@@ -58,23 +96,26 @@ suite('Template Core', () => {
 			version: '1.0.0',
 			description: 'Demo template',
 			entry: 'main.tex',
-			schema: [{ key: 'title', type: 'string', label: 'Title' }]
+			schema: [{ key: 'Title', type: 'string', label: 'Title' }]
 		};
 		const template: TemplatePackage = {
 			manifest,
 			dir: tempRoot,
 			entryPath: path.join(tempRoot, 'main.tex'),
 			assetsDir,
-			mainTex: String.raw`\\documentclass{article}\\begin{document}{{title}}\\end{document}`,
+			mainTex: String.raw`\\documentclass{article}\\begin{document}\\input{co_data.tex}{{Title}}\\end{document}`,
 			previewData: {},
 			readOnly: false
 		};
 		const prev = process.env.TECTONIC_PATH;
 		process.env.TECTONIC_PATH = '__missing_tectonic__';
 		try {
-			const result = await buildPreview(template, { title: 'Teste' }, outDir);
+			const result = await buildPreview(template, { Title: 'Teste' }, outDir);
+			assert.strictEqual(result.texPath, path.join(outDir, 'main.tex'));
 			const tex = await fs.readFile(result.texPath, 'utf8');
 			assert.ok(tex.includes('Teste'));
+			const dataTex = await fs.readFile(path.join(outDir, 'co_data.tex'), 'utf8');
+			assert.ok(dataTex.includes('\\def\\Title{Teste}'));
 			assert.strictEqual(result.ok, false);
 		} finally {
 			if (prev === undefined) {

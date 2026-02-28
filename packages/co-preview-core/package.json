@@ -1,0 +1,12 @@
+{
+	"name": "co-preview-core",
+	"version": "0.0.1",
+	"description": "Shared PDF preview utilities for CO",
+	"main": "./out/index.js",
+	"types": "./index.d.ts",
+	"license": "MIT",
+	"private": true,
+	"devDependencies": {
+		"@types/node": "^22.18.10"
+	}
+}

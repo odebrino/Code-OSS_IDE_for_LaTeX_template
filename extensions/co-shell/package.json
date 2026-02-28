@@ -2,6 +2,7 @@
 	"name": "co-shell",
 	"displayName": "CO Shell",
 	"description": "Student/Admin shell UI for CO Dev",
+	"icon": "resources/icon.png",
 	"publisher": "odebrino",
 	"version": "0.0.1",
 	"license": "MIT",
@@ -41,7 +42,7 @@
 		},
 		"viewsContainers": {
 			"activitybar": [
-				{ "id": "coShell", "title": "CO", "icon": "resources/co-view.svg" }
+				{ "id": "coShell", "title": "CO", "icon": "resources/icon.png" }
 			]
 		},
 		"views": {

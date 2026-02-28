@@ -2,11 +2,17 @@
 	"name": "co-diagramador",
 	"displayName": "Diagramador",
 	"description": "Diagramador de templates LaTeX para CO",
+	"icon": "resources/co-view.svg",
 	"publisher": "odebrino",
 	"version": "0.0.1",
 	"license": "MIT",
 	"dependencies": {
-		"co-template-core": "file:../../packages/co-template-core"
+		"co-doc-core": "file:../../packages/co-doc-core",
+		"co-preview-core": "file:../../packages/co-preview-core",
+		"co-storage-core": "file:../../packages/co-storage-core",
+		"co-template-core": "file:../../packages/co-template-core",
+		"yauzl": "^3.0.0",
+		"yazl": "^2.5.1"
 	},
 	"engines": {
 		"vscode": "^1.90.0"
@@ -26,7 +32,9 @@
 		}
 	},
 	"devDependencies": {
-		"@types/node": "^22.18.10"
+		"@types/node": "^22.18.10",
+		"@types/yauzl": "^2.10.0",
+		"@types/yazl": "^2.4.2"
 	},
 	"contributes": {
 		"commands": [
@@ -54,6 +62,11 @@
 		"configuration": {
 			"title": "CO",
 			"properties": {
+				"co.diagramador.fastBuild": {
+					"type": "boolean",
+					"default": true,
+					"description": "Usa compilacao rapida no Diagramador (menos reruns do Tectonic)."
+				},
 				"co.tectonic.bundlePath": {
 					"type": "string",
 					"default": "",

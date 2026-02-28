@@ -1,0 +1,12 @@
+{
+	"name": "co-storage-core",
+	"version": "0.0.1",
+	"description": "Shared storage core for CO",
+	"main": "./out/index.js",
+	"types": "./index.d.ts",
+	"license": "MIT",
+	"private": true,
+	"devDependencies": {
+		"@types/node": "^22.18.10"
+	}
+}

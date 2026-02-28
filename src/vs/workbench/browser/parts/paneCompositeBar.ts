@@ -81,7 +81,8 @@ const COZITOS_SIDEBAR_FORCE_PIN = new Set<string>([
 ]);
 
 const CO_DEV_SIDEBAR_FORCE_PIN = new Set<string>([
-	'workbench.view.extension.co-template-generator'
+	'workbench.view.extension.co-correcao',
+	'workbench.view.extension.co-data-set'
 ]);
 
 export interface IPaneCompositeBarOptions {

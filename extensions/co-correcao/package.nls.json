@@ -1,0 +1,11 @@
+{
+	"displayName": "Correcao",
+	"description": "Revisoes e sugestoes para tarefas CO.",
+	"coCorrecao.openTaskPdf.title": "Correcao: Abrir Tarefa",
+	"coCorrecao.newRevision.title": "Correcao: Nova Revisao",
+	"coCorrecao.selectRevision.title": "Correcao: Selecionar Revisao",
+	"coCorrecao.acceptSuggestion.title": "Correcao: Aceitar Sugestao",
+	"coCorrecao.rejectSuggestion.title": "Correcao: Rejeitar Sugestao",
+	"correcao.activity.title": "Correcao",
+	"coCorrecao.view.title": "Correcao"
+}

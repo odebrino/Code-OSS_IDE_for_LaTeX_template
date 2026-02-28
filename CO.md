@@ -4,9 +4,10 @@ This is a CO-branded fork of Code-OSS with LaTeX Workshop embedded.
 
 ## CO Layout
 - `packages/co-template-core`: Shared template contract, validation, renderer, and build service.
+- `extensions/co-correcao`: Correcao (revisoes e sugestoes com preview PDF).
 - `extensions/co-shell`: CO Shell (roles, admin/student home).
-- `extensions/co-diagramador`: Diagramador UI and preview pipeline.
-- `extensions/co-template-generator`: Template Generator UI.
+- `extensions/co-diagramador`: Diagramador UI, preview pipeline, e aba de Templates.
+- `extensions/co-data-set`: Data Set (indexador de projetos/templates/pdfs).
 
 ## CO Tests
 - Build core: `npx tsc -p packages/co-template-core/tsconfig.json`

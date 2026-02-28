@@ -6,7 +6,7 @@
 /* eslint-disable local/code-no-unexternalized-strings */
 
 import * as vscode from 'vscode';
-import { DiagramadorProject } from './diagramador';
+import type { TemplateFieldSchema } from 'co-template-core';
 
 type MessageHandler = (message: any, webview: vscode.Webview) => void | Promise<void>;
 
@@ -15,6 +15,8 @@ export type DiagramadorStatus = {
 	message?: string;
 };
 
+type DiagramadorFieldValue = string | number | boolean | string[] | null;
+
 export type DiagramadorTemplateSummary = {
 	id: string;
 	name: string;
@@ -22,20 +24,63 @@ export type DiagramadorTemplateSummary = {
 	description?: string;
 };
 
+export type DiagramadorTaskSummary = {
+	id: string;
+	label: string;
+	updatedAt: number;
+};
+
+export type DiagramadorState = {
+	templates: DiagramadorTemplateSummary[];
+	selectedTemplateId: string;
+	schema: TemplateFieldSchema[];
+	data: Record<string, DiagramadorFieldValue>;
+	status: DiagramadorStatus;
+	buildError?: string;
+	buildLogPath?: string;
+	tasks: DiagramadorTaskSummary[];
+	currentTaskId?: string;
+	activeTab?: 'document' | 'templates';
+	templateEditor?: {
+		selectedTemplateId: string;
+		template?: {
+			manifest: {
+				id: string;
+				name: string;
+				version: string;
+				description: string;
+				entry: string;
+				schema: TemplateFieldSchema[];
+				defaults?: Record<string, DiagramadorFieldValue>;
+			};
+			mainTex: string;
+			previewData: Record<string, DiagramadorFieldValue>;
+			readOnly: boolean;
+			assets: string[];
+		};
+		status: DiagramadorStatus;
+		error?: string;
+		buildError?: string;
+		buildLogPath?: string;
+		revision?: number;
+	};
+};
+
 export class DiagramadorViewProvider implements vscode.WebviewViewProvider {
 	private view?: vscode.WebviewView;
 	private readonly uiBuildId: string;
 	private lastHtmlBuildId?: string;
-	private templates: DiagramadorTemplateSummary[] = [];
+	private state: DiagramadorState;
 
 	constructor(
 		private readonly context: vscode.ExtensionContext,
 		private readonly onMessage: MessageHandler,
-		private readonly getProject: () => DiagramadorProject,
+		private readonly getState: () => DiagramadorState,
 		uiBuildId: string,
 		private readonly onVisible?: () => void
 	) {
 		this.uiBuildId = uiBuildId;
+		this.state = getState();
 	}
 
 	resolveWebviewView(view: vscode.WebviewView): void {
@@ -54,17 +99,9 @@ export class DiagramadorViewProvider implements vscode.WebviewViewProvider {
 		});
 	}
 
-	sendProject(project: DiagramadorProject) {
-		this.view?.webview.postMessage({ type: 'project', project });
-	}
-
-	sendTemplates(templates: DiagramadorTemplateSummary[]) {
-		this.templates = templates;
-		this.view?.webview.postMessage({ type: 'templates', templates });
-	}
-
-	sendStatus(status: DiagramadorStatus) {
-		this.view?.webview.postMessage({ type: 'status', status });
+	sendState(state: DiagramadorState) {
+		this.state = state;
+		this.view?.webview.postMessage({ type: 'state', state });
 	}
 
 	show(preserveFocus = true) {
@@ -79,7 +116,8 @@ export class DiagramadorViewProvider implements vscode.WebviewViewProvider {
 		if (!force && this.lastHtmlBuildId === this.uiBuildId) {
 			return;
 		}
-		this.view.webview.html = getDiagramadorHtml(this.view.webview, this.getProject(), this.templates, this.uiBuildId);
+		this.state = this.getState();
+		this.view.webview.html = getDiagramadorHtml(this.view.webview, this.state, this.uiBuildId);
 		this.lastHtmlBuildId = this.uiBuildId;
 	}
 }
@@ -87,10 +125,10 @@ export class DiagramadorViewProvider implements vscode.WebviewViewProvider {
 export function registerDiagramadorView(
 	context: vscode.ExtensionContext,
 	onMessage: MessageHandler,
-	getProject: () => DiagramadorProject,
+	getState: () => DiagramadorState,
 	onVisible?: () => void
 ) {
-	const provider = new DiagramadorViewProvider(context, onMessage, getProject, getUiBuildId(context), onVisible);
+	const provider = new DiagramadorViewProvider(context, onMessage, getState, getUiBuildId(context), onVisible);
 	context.subscriptions.push(
 		vscode.window.registerWebviewViewProvider('co.diagramador.blocksView', provider)
 	);
@@ -107,8 +145,7 @@ function getUiBuildId(context: vscode.ExtensionContext): string {
 
 function getDiagramadorHtml(
 	webview: vscode.Webview,
-	project: DiagramadorProject,
-	templates: DiagramadorTemplateSummary[],
+	state: DiagramadorState,
 	uiBuildId: string
 ): string {
 	const nonce = getNonce();
@@ -118,8 +155,7 @@ function getDiagramadorHtml(
 		`style-src ${webview.cspSource} 'unsafe-inline'`,
 		`script-src 'nonce-${nonce}'`
 	].join('; ');
-	const projectJson = JSON.stringify(project).replace(/</g, '\\u003c');
-	const templatesJson = JSON.stringify(templates).replace(/</g, '\\u003c');
+	const stateJson = JSON.stringify(state).replace(/</g, '\\u003c');
 	const safeBuildId = escapeHtml(uiBuildId);
 
 	return `<!DOCTYPE html>
@@ -130,92 +166,338 @@ function getDiagramadorHtml(
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>Diagramador</title>
 <style>
+	:root {
+		--bg: radial-gradient(120% 80% at -10% -20%, rgba(56, 189, 248, 0.18), transparent 60%),
+			radial-gradient(120% 70% at 110% -10%, rgba(249, 115, 22, 0.18), transparent 55%),
+			var(--vscode-sideBar-background, #f7f4ef);
+		--surface: var(--vscode-editor-background, #ffffff);
+		--card-bg: linear-gradient(120deg, rgba(255, 255, 255, 0.08), rgba(0, 0, 0, 0.04) 45%), var(--surface);
+		--card-border: var(--vscode-panel-border, rgba(0, 0, 0, 0.12));
+		--text: var(--vscode-foreground, #222222);
+		--muted: var(--vscode-descriptionForeground, rgba(100, 100, 100, 0.8));
+		--accent: #f97316;
+		--accent-strong: #fb923c;
+		--shadow: 0 16px 30px rgba(0, 0, 0, 0.18);
+		--radius: 14px;
+		--font-display: "Iowan Old Style", "Palatino Linotype", "Book Antiqua", serif;
+		--font-body: "Alegreya Sans", "Trebuchet MS", "Lucida Sans Unicode", sans-serif;
+	}
 	body {
-		font-family: var(--vscode-font-family, system-ui, Arial, sans-serif);
+		font-family: var(--font-body);
+		font-size: 14px;
+		line-height: 1.45;
 		margin: 0;
-		padding: 12px;
-		color: var(--vscode-foreground, #222);
-		background: var(--vscode-sideBar-background, #f7f7f7);
+		padding: 16px;
+		color: var(--text);
+		background: var(--bg);
+		min-height: 100vh;
+		background-attachment: fixed;
 	}
-	h2 { margin: 0 0 8px 0; font-size: 14px; }
+	.container {
+		display: flex;
+		flex-direction: column;
+		gap: 14px;
+	}
+	.hero {
+		display: flex;
+		align-items: flex-start;
+		justify-content: space-between;
+		gap: 16px;
+	}
+	.eyebrow {
+		font-size: 10px;
+		letter-spacing: 0.18em;
+		text-transform: uppercase;
+		color: var(--muted);
+	}
+	.hero h1 {
+		font-family: var(--font-display);
+		font-size: 24px;
+		margin: 4px 0 6px;
+	}
+	.lead {
+		margin: 0;
+		font-size: 14px;
+		color: var(--muted);
+		max-width: 38ch;
+	}
+	.status-chip {
+		display: inline-flex;
+		align-items: center;
+		gap: 8px;
+		padding: 6px 12px;
+		border-radius: 999px;
+		border: 1px solid var(--card-border);
+		background: rgba(8, 8, 8, 0.5);
+		font-size: 13px;
+		color: var(--text);
+	}
+	.status-chip::before {
+		content: '';
+		width: 7px;
+		height: 7px;
+		border-radius: 50%;
+		background: var(--muted);
+		box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.05);
+	}
+	.status-chip[data-state="building"]::before {
+		background: #f59e0b;
+		box-shadow: 0 0 0 3px rgba(245, 158, 11, 0.2);
+	}
+	.status-chip[data-state="success"]::before {
+		background: #22c55e;
+		box-shadow: 0 0 0 3px rgba(34, 197, 94, 0.2);
+	}
+	.status-chip[data-state="error"]::before {
+		background: #ef4444;
+		box-shadow: 0 0 0 3px rgba(239, 68, 68, 0.2);
+	}
+	.status-stack {
+		display: flex;
+		flex-direction: column;
+		align-items: flex-end;
+		gap: 6px;
+	}
+	.meta {
+		font-size: 12px;
+		color: var(--muted);
+	}
 	.card {
-		background: var(--vscode-editor-background, #fff);
-		border: 1px solid var(--vscode-panel-border, #ddd);
-		border-radius: 8px;
-		padding: 10px;
-		margin-bottom: 10px;
+		background: var(--card-bg);
+		border: 1px solid var(--card-border);
+		border-radius: var(--radius);
+		padding: 14px;
+		box-shadow: var(--shadow);
+		position: relative;
+		overflow: hidden;
+		animation: rise 0.45s ease both;
+		animation-delay: var(--delay, 0s);
 	}
-	.topline {
+	.tabs {
+		display: flex;
+		gap: 8px;
+		margin: 6px 0 2px;
+	}
+	.tab-button {
+		flex: 1;
+		border: 1px solid var(--card-border);
+		border-radius: 999px;
+		padding: 8px 12px;
+		background: rgba(12, 12, 12, 0.35);
+		color: var(--text);
+		font-family: var(--font-body);
+		font-size: 13px;
+		cursor: pointer;
+		transition: all 0.2s ease;
+	}
+	.tab-button[data-active="true"] {
+		background: var(--accent);
+		color: #1a1208;
+		border-color: rgba(0, 0, 0, 0.2);
+	}
+	.panel {
+		display: flex;
+		flex-direction: column;
+		gap: 14px;
+	}
+	.panel.hidden {
+		display: none;
+	}
+	.hidden {
+		display: none;
+	}
+	.actions {
+		display: flex;
+		gap: 8px;
+		flex-wrap: wrap;
+	}
+	.asset-list {
+		display: flex;
+		flex-direction: column;
+		gap: 8px;
+	}
+	.asset-item {
 		display: flex;
 		align-items: center;
 		justify-content: space-between;
-		gap: 8px;
-		flex-wrap: wrap;
+		gap: 12px;
+		padding: 10px 12px;
+		border-radius: 10px;
+		border: 1px solid var(--card-border);
+		background: rgba(10, 10, 10, 0.35);
+	}
+	.code-input {
+		font-family: "SFMono-Regular", "Fira Code", "Consolas", "Liberation Mono", monospace;
+		font-size: 12px;
+		min-height: 120px;
+	}
+	.error-line {
+		font-size: 12px;
+		color: #f87171;
+		min-height: 14px;
+	}
+	.card::after {
+		content: '';
+		position: absolute;
+		inset: 0;
+		background: linear-gradient(120deg, rgba(255, 255, 255, 0.06), transparent 45%);
+		pointer-events: none;
+	}
+	.card-title {
+		font-size: 15px;
+		font-weight: 600;
+		letter-spacing: 0.02em;
 		margin-bottom: 10px;
 	}
-	.template-title {
-		font-size: 12px;
+	.card-header {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 12px;
+		margin-bottom: 10px;
+	}
+	.card-header .card-title {
+		margin-bottom: 0;
+	}
+	.task-list {
+		display: flex;
+		flex-direction: column;
+		gap: 8px;
+	}
+	.task-item {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: 12px;
+		padding: 10px 12px;
+		border-radius: 12px;
+		border: 1px solid rgba(255, 255, 255, 0.08);
+		background: rgba(10, 10, 10, 0.45);
+	}
+	.task-actions {
+		display: flex;
+		align-items: center;
+		gap: 6px;
+		flex-wrap: wrap;
+	}
+	.task-actions button {
+		padding: 6px 10px;
+		font-size: 11px;
+	}
+	.task-item[data-active="true"] {
+		border-color: rgba(249, 115, 22, 0.6);
+		box-shadow: 0 0 0 1px rgba(249, 115, 22, 0.18) inset;
+	}
+	.task-meta {
+		display: flex;
+		flex-direction: column;
+		gap: 2px;
+	}
+	.task-title {
 		font-weight: 600;
 	}
-	.ui-build {
-		font-size: 10px;
-		color: #666;
-		margin-bottom: 8px;
+	.task-date {
+		font-size: 11px;
+		color: var(--muted);
 	}
-	.status { font-size: 12px; color: var(--vscode-foreground, #444); }
-	.status[data-state="error"] { color: #a33; }
-	.status[data-state="success"] { color: #2d7ef7; }
-	label { display: block; font-size: 12px; margin: 6px 0 4px; }
+	.field {
+		display: flex;
+		flex-direction: column;
+		gap: 6px;
+		margin-bottom: 10px;
+	}
+	.field:last-child { margin-bottom: 0; }
+	.field-grid {
+		display: grid;
+		grid-template-columns: repeat(2, minmax(0, 1fr));
+		gap: 10px;
+	}
+	label {
+		display: block;
+		font-size: 11px;
+		text-transform: uppercase;
+		letter-spacing: 0.08em;
+		color: var(--muted);
+	}
 	input, textarea, select {
 		width: 100%;
 		box-sizing: border-box;
-		padding: 6px 8px;
-		border-radius: 6px;
-		border: 1px solid var(--vscode-input-border, #ccc);
-		background: var(--vscode-input-background, #fff);
-		color: inherit;
-		font-size: 12px;
+		padding: 10px 12px;
+		border-radius: 10px;
+		border: 1px solid rgba(255, 255, 255, 0.08);
+		background: rgba(10, 10, 10, 0.5);
+		color: var(--text);
+		font-size: 14px;
+		box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.02);
 	}
-	textarea { resize: vertical; min-height: 140px; }
+	select:focus,
+	input:focus,
+	textarea:focus {
+		outline: 2px solid rgba(249, 115, 22, 0.35);
+		border-color: rgba(249, 115, 22, 0.55);
+	}
+	input[type="checkbox"] {
+		width: auto;
+		margin: 0;
+	}
+	.checkbox-row {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+	}
+	textarea { resize: vertical; min-height: 160px; }
 	button {
 		width: auto;
-		background: #2d7ef7;
-		color: #fff;
+		background: linear-gradient(135deg, var(--accent), var(--accent-strong));
+		color: #1f1406;
 		border: none;
 		cursor: pointer;
-		padding: 6px 10px;
-		border-radius: 6px;
-		font-size: 12px;
+		padding: 8px 12px;
+		border-radius: 10px;
+		font-size: 13px;
+		font-weight: 600;
+		box-shadow: 0 8px 20px rgba(249, 115, 22, 0.25);
 	}
-	button.secondary { background: #5c6b7a; }
+	button.secondary {
+		background: rgba(148, 163, 184, 0.25);
+		color: var(--text);
+		border: 1px solid rgba(148, 163, 184, 0.4);
+		box-shadow: none;
+	}
 	button:disabled { opacity: 0.5; cursor: not-allowed; }
 	.empty {
 		font-size: 12px;
-		color: #666;
+		color: var(--muted);
 		padding: 6px 0;
 	}
 	.hint {
-		font-size: 11px;
-		color: #666;
-		margin-top: 6px;
+		font-size: 12px;
+		color: var(--muted);
+		margin-top: 8px;
 	}
 	.section {
-		margin-top: 12px;
+		margin-top: 14px;
+		padding-top: 6px;
+		border-top: 1px dashed rgba(255, 255, 255, 0.12);
 	}
 	.section-header {
 		display: flex;
 		align-items: center;
 		justify-content: space-between;
 		gap: 8px;
-		margin-bottom: 6px;
+		margin-bottom: 8px;
+	}
+	.section-title {
 		font-size: 12px;
-		font-weight: 600;
+		text-transform: uppercase;
+		letter-spacing: 0.1em;
+		color: var(--muted);
 	}
 	.member-row {
 		display: grid;
 		grid-template-columns: 1fr auto;
-		gap: 6px;
-		margin-bottom: 6px;
+		gap: 8px;
+		margin-bottom: 8px;
 	}
 	.chips {
 		display: flex;
@@ -227,85 +509,388 @@ function getDiagramadorHtml(
 		display: inline-flex;
 		align-items: center;
 		gap: 6px;
-		padding: 4px 8px;
+		padding: 5px 10px;
 		border-radius: 999px;
-		border: 1px solid rgba(45, 126, 247, 0.35);
-		background: rgba(45, 126, 247, 0.12);
-		font-size: 11px;
+		border: 1px solid rgba(249, 115, 22, 0.35);
+		background: rgba(249, 115, 22, 0.12);
+		font-size: 12px;
 	}
 	.chip button {
 		background: transparent;
 		color: inherit;
-		padding: 0 4px;
+		padding: 0 6px;
 		border-radius: 999px;
+		box-shadow: none;
+	}
+	.build-id {
+		font-size: 10px;
+		color: rgba(220, 220, 220, 0.55);
+		letter-spacing: 0.12em;
+		text-transform: uppercase;
+	}
+	@keyframes rise {
+		from { opacity: 0; transform: translateY(6px); }
+		to { opacity: 1; transform: translateY(0); }
+	}
+	@media (max-width: 420px) {
+		.field-grid { grid-template-columns: 1fr; }
+		.hero { flex-direction: column; }
+		.task-item { flex-direction: column; align-items: flex-start; }
 	}
 </style>
 </head>
 <body>
-	<div class="topline">
-		<div class="template-title" id="templateTitle"></div>
-		<div class="status" id="status" data-state="idle"></div>
+	<div class="container">
+	<div class="hero">
+			<div>
+				<div class="eyebrow">Diagramador</div>
+				<h1>Diagramador de Tarefas</h1>
+				<p class="lead">Preencha os blocos e o PDF atualiza automaticamente ao lado.</p>
+			</div>
+			<div class="status-stack">
+				<div class="status-chip" id="status" data-state="idle">Aguardando alteracoes</div>
+				<div id="buildError" class="error-line"></div>
+				<button id="buildLogButton" class="secondary hidden" type="button">Abrir log</button>
+			</div>
+		</div>
+		<div class="tabs">
+			<button id="tabDocument" class="tab-button" data-tab="document" data-active="true" type="button">Documento</button>
+			<button id="tabTemplates" class="tab-button" data-tab="templates" data-active="false" type="button">Templates</button>
+		</div>
+
+		<div id="documentPanel" class="panel">
+			<div class="meta" id="templateTitle"></div>
+
+			<section class="card" style="--delay: 0s;">
+				<div class="card-header">
+				<div class="card-title">Suas Tarefas:</div>
+					<button id="newTaskButton" type="button">Nova Tarefa</button>
+				</div>
+				<div id="tasksList" class="task-list"></div>
+				<div id="tasksHint" class="hint"></div>
+			</section>
+
+			<section class="card" style="--delay: 0.05s;">
+				<div class="card-title">Selecionador de Template</div>
+				<div class="field">
+					<label for="templateSelect">Template</label>
+					<select id="templateSelect"></select>
+				</div>
+				<div class="hint">Template simples para validar preview.</div>
+			</section>
+
+			<section class="card" style="--delay: 0.1s;">
+				<div class="card-title">Campos do Template</div>
+				<div id="fieldsContainer"></div>
+				<div id="fieldsHint" class="hint"></div>
+			</section>
+		</div>
+
+		<div id="templatesPanel" class="panel hidden">
+			<section class="card" style="--delay: 0s;">
+				<div class="card-header">
+					<div class="card-title">Templates</div>
+					<div class="actions">
+						<button id="templateCreateButton" type="button">Novo</button>
+						<button id="templateDuplicateButton" type="button">Duplicar</button>
+						<button id="templateExportButton" type="button">Exportar ZIP</button>
+						<button id="templateImportButton" type="button">Importar ZIP</button>
+						<button id="templateDeleteButton" type="button">Excluir</button>
+					</div>
+				</div>
+				<div class="field">
+					<label for="templateEditorSelect">Selecionar</label>
+					<select id="templateEditorSelect"></select>
+				</div>
+				<div class="card-header" style="margin-top: 6px;">
+					<div class="card-title">Preview</div>
+					<div class="status-chip" id="templateStatus" data-state="idle">Aguardando alteracoes</div>
+				</div>
+				<div id="templateError" class="error-line"></div>
+				<div id="templateBuildError" class="error-line"></div>
+				<button id="templateBuildLogButton" class="secondary hidden" type="button">Abrir log</button>
+			</section>
+
+			<section class="card" style="--delay: 0.05s;">
+				<div class="card-header">
+					<div class="card-title">Editor</div>
+					<button id="templateSaveButton" type="button">Salvar</button>
+				</div>
+				<div class="field">
+					<label for="templateManifestInput">template.json</label>
+					<textarea id="templateManifestInput" class="code-input" spellcheck="false"></textarea>
+					<div id="templateManifestError" class="error-line"></div>
+				</div>
+				<div class="field">
+					<label for="templateMainTexInput">main.tex</label>
+					<textarea id="templateMainTexInput" class="code-input" spellcheck="false"></textarea>
+				</div>
+				<div class="field">
+					<label for="templatePreviewInput">preview_data.json</label>
+					<textarea id="templatePreviewInput" class="code-input" spellcheck="false"></textarea>
+					<div id="templatePreviewError" class="error-line"></div>
+				</div>
+			</section>
+
+			<section class="card" style="--delay: 0.1s;">
+				<div class="card-header">
+					<div class="card-title">Assets</div>
+					<button id="templateAddAssetButton" type="button">Adicionar</button>
+				</div>
+				<input id="templateAssetInput" type="file" multiple class="hidden" />
+				<div id="templateAssetsList" class="asset-list"></div>
+				<div class="hint">Arquivos copiados para a pasta assets do template.</div>
+			</section>
+		</div>
+
+		<div class="build-id">UI_BUILD: ${safeBuildId}</div>
 	</div>
-	<div class="ui-build">UI_BUILD: ${safeBuildId}</div>
-
-	<section class="card">
-		<h2>Selecionador de Template</h2>
-		<label for="templateSelect">Template</label>
-		<select id="templateSelect"></select>
-		<div class="hint">Template simples para validar preview.</div>
-	</section>
-
-	<section class="card">
-		<h2>Dados do Documento</h2>
-		<label for="doc-title">Titulo</label>
-		<input id="doc-title" type="text" />
-
-		<label for="doc-model">Modelo</label>
-		<input id="doc-model" type="text" />
-
-		<label for="doc-text">Texto</label>
-		<textarea id="doc-text"></textarea>
-
-		<div class="section">
-			<div class="section-header">
-				<span>Integrantes</span>
-				<button id="addMember" class="secondary" type="button">Adicionar integrante</button>
-			</div>
-			<div id="membersList"></div>
-		</div>
-
-		<div class="section">
-			<div class="section-header">
-				<span>Palavras-chave</span>
-			</div>
-			<div id="keywordsList" class="chips"></div>
-			<input id="keywordInput" type="text" placeholder="Digite e pressione Enter" />
-		</div>
-	</section>
 
 <script nonce="${nonce}">
 	const vscode = acquireVsCodeApi();
-	let project = ${projectJson};
-	let templates = ${templatesJson};
+	let state = ${stateJson};
 
 	const statusEl = document.getElementById('status');
+	const buildErrorEl = document.getElementById('buildError');
+	const buildLogButton = document.getElementById('buildLogButton');
 	const templateTitleEl = document.getElementById('templateTitle');
+	const tasksList = document.getElementById('tasksList');
+	const tasksHint = document.getElementById('tasksHint');
+	const newTaskButton = document.getElementById('newTaskButton');
 	const templateSelect = document.getElementById('templateSelect');
-	const titleInput = document.getElementById('doc-title');
-	const modelInput = document.getElementById('doc-model');
-	const textInput = document.getElementById('doc-text');
-	const membersList = document.getElementById('membersList');
-	const addMemberBtn = document.getElementById('addMember');
-	const keywordsList = document.getElementById('keywordsList');
-	const keywordInput = document.getElementById('keywordInput');
+	const fieldsContainer = document.getElementById('fieldsContainer');
+	const fieldsHint = document.getElementById('fieldsHint');
+	const tabDocument = document.getElementById('tabDocument');
+	const tabTemplates = document.getElementById('tabTemplates');
+	const documentPanel = document.getElementById('documentPanel');
+	const templatesPanel = document.getElementById('templatesPanel');
+	const templateEditorSelect = document.getElementById('templateEditorSelect');
+	const templateCreateButton = document.getElementById('templateCreateButton');
+	const templateDuplicateButton = document.getElementById('templateDuplicateButton');
+	const templateDeleteButton = document.getElementById('templateDeleteButton');
+	const templateExportButton = document.getElementById('templateExportButton');
+	const templateImportButton = document.getElementById('templateImportButton');
+	const templateSaveButton = document.getElementById('templateSaveButton');
+	const templateStatusEl = document.getElementById('templateStatus');
+	const templateErrorEl = document.getElementById('templateError');
+	const templateBuildErrorEl = document.getElementById('templateBuildError');
+	const templateBuildLogButton = document.getElementById('templateBuildLogButton');
+	const templateManifestInput = document.getElementById('templateManifestInput');
+	const templateManifestErrorEl = document.getElementById('templateManifestError');
+	const templateMainTexInput = document.getElementById('templateMainTexInput');
+	const templatePreviewInput = document.getElementById('templatePreviewInput');
+	const templatePreviewErrorEl = document.getElementById('templatePreviewError');
+	const templateAssetsList = document.getElementById('templateAssetsList');
+	const templateAssetInput = document.getElementById('templateAssetInput');
+	const templateAddAssetButton = document.getElementById('templateAddAssetButton');
 
-	function setTemplates(next) {
-		templates = Array.isArray(next) ? next : [];
+	let activeTab = 'document';
+	let templateDraft = { manifestText: '', mainTex: '', previewText: '' };
+	let templateDraftId = '';
+	let templateDraftRevision = 0;
+	let templateDirty = false;
+	const FIELD_UPDATE_DEBOUNCE_MS = 400;
+	const pendingFieldUpdates = new Map();
+
+	function normalizeState(next) {
+		const base = next && typeof next === 'object' ? next : {};
+		const editor = base.templateEditor && typeof base.templateEditor === 'object' ? base.templateEditor : {};
+		const template = editor.template && typeof editor.template === 'object' ? editor.template : undefined;
+		return {
+			templates: Array.isArray(base.templates) ? base.templates : [],
+			selectedTemplateId: typeof base.selectedTemplateId === 'string' ? base.selectedTemplateId : '',
+			schema: Array.isArray(base.schema) ? base.schema : [],
+			data: base.data && typeof base.data === 'object' ? base.data : {},
+			status: base.status && typeof base.status === 'object' ? base.status : { state: 'idle' },
+			buildError: typeof base.buildError === 'string' ? base.buildError : '',
+			buildLogPath: typeof base.buildLogPath === 'string' ? base.buildLogPath : '',
+			tasks: Array.isArray(base.tasks) ? base.tasks : [],
+			currentTaskId: typeof base.currentTaskId === 'string' ? base.currentTaskId : '',
+			activeTab: base.activeTab === 'templates' ? 'templates' : 'document',
+			templateEditor: {
+				selectedTemplateId: typeof editor.selectedTemplateId === 'string' ? editor.selectedTemplateId : '',
+				template: template
+					? {
+						manifest: template.manifest || {},
+						mainTex: typeof template.mainTex === 'string' ? template.mainTex : '',
+						previewData: template.previewData && typeof template.previewData === 'object' ? template.previewData : {},
+						readOnly: Boolean(template.readOnly),
+						assets: Array.isArray(template.assets) ? template.assets : []
+					}
+					: undefined,
+				status: editor.status && typeof editor.status === 'object' ? editor.status : { state: 'idle' },
+				error: typeof editor.error === 'string' ? editor.error : '',
+				buildError: typeof editor.buildError === 'string' ? editor.buildError : '',
+				buildLogPath: typeof editor.buildLogPath === 'string' ? editor.buildLogPath : '',
+				revision: Number.isFinite(editor.revision) ? editor.revision : 0
+			}
+		};
+	}
+
+	function sendFieldUpdate(key, value) {
+		vscode.postMessage({ type: 'updateField', key, value });
+	}
+
+	function queueFieldUpdate(key, value) {
+		const entry = pendingFieldUpdates.get(key);
+		if (entry?.timer) {
+			clearTimeout(entry.timer);
+		}
+		const timer = window.setTimeout(() => {
+			pendingFieldUpdates.delete(key);
+			sendFieldUpdate(key, value);
+		}, FIELD_UPDATE_DEBOUNCE_MS);
+		pendingFieldUpdates.set(key, { timer, value });
+	}
+
+	function flushFieldUpdate(key) {
+		const entry = pendingFieldUpdates.get(key);
+		if (!entry) {
+			return;
+		}
+		clearTimeout(entry.timer);
+		pendingFieldUpdates.delete(key);
+		sendFieldUpdate(key, entry.value);
+	}
+
+	function flushPendingFieldUpdates() {
+		Array.from(pendingFieldUpdates.keys()).forEach(key => flushFieldUpdate(key));
+	}
+
+	function clearPendingFieldUpdates() {
+		for (const entry of pendingFieldUpdates.values()) {
+			clearTimeout(entry.timer);
+		}
+		pendingFieldUpdates.clear();
+	}
+
+	function setState(next) {
+		const previousTaskId = state.currentTaskId;
+		state = normalizeState(next);
+		if (previousTaskId && state.currentTaskId !== previousTaskId) {
+			clearPendingFieldUpdates();
+		}
+		if (state.activeTab && state.activeTab !== activeTab) {
+			activeTab = state.activeTab;
+		}
+		renderAll();
+	}
+
+	function applyActiveTab(tab, notify) {
+		activeTab = tab === 'templates' ? 'templates' : 'document';
+		tabDocument.dataset.active = String(activeTab === 'document');
+		tabTemplates.dataset.active = String(activeTab === 'templates');
+		documentPanel.classList.toggle('hidden', activeTab !== 'document');
+		templatesPanel.classList.toggle('hidden', activeTab !== 'templates');
+		if (notify) {
+			vscode.postMessage({ type: 'setTab', tab: activeTab });
+		}
+	}
+
+	function isEditorEnabled() {
+		return Boolean(state.currentTaskId);
+	}
+
+	function readFileAsBase64(file) {
+		return new Promise((resolve) => {
+			if (!file) {
+				resolve('');
+				return;
+			}
+			const reader = new FileReader();
+			reader.onload = () => {
+				const result = reader.result;
+				if (typeof result === 'string') {
+					const commaIndex = result.indexOf(',');
+					resolve(commaIndex >= 0 ? result.slice(commaIndex + 1) : result);
+					return;
+				}
+				resolve('');
+			};
+			reader.onerror = () => resolve('');
+			reader.readAsDataURL(file);
+		});
+	}
+
+	function formatTaskDate(value) {
+		if (!Number.isFinite(value) || value <= 0) {
+			return '';
+		}
+		const date = new Date(value);
+		return date.toLocaleString('pt-BR');
+	}
+
+	function renderTasks() {
+		tasksList.innerHTML = '';
+		if (!state.tasks.length) {
+			const empty = document.createElement('div');
+			empty.className = 'empty';
+			empty.textContent = 'Nenhuma tarefa salva.';
+			tasksList.appendChild(empty);
+			tasksHint.textContent = 'Crie uma nova tarefa para iniciar.';
+			return;
+		}
+		tasksHint.textContent = state.currentTaskId
+			? 'Selecione outra tarefa para editar.'
+			: 'Selecione uma tarefa para editar.';
+		state.tasks.forEach((task) => {
+			const row = document.createElement('div');
+			row.className = 'task-item';
+			row.dataset.active = String(task.id === state.currentTaskId);
+			const meta = document.createElement('div');
+			meta.className = 'task-meta';
+			const title = document.createElement('div');
+			title.className = 'task-title';
+			title.textContent = task.label || 'Tarefa';
+			const date = document.createElement('div');
+			date.className = 'task-date';
+			const formatted = formatTaskDate(task.updatedAt);
+			date.textContent = formatted ? 'Atualizada em ' + formatted : 'Atualizada recentemente';
+			meta.appendChild(title);
+			meta.appendChild(date);
+			const actions = document.createElement('div');
+			actions.className = 'task-actions';
+			const button = document.createElement('button');
+			button.type = 'button';
+			button.className = 'secondary';
+			if (task.id === state.currentTaskId) {
+				button.textContent = 'Em Edicao';
+				button.disabled = true;
+			} else {
+				button.textContent = 'Abrir';
+				button.addEventListener('click', () => {
+					flushPendingFieldUpdates();
+					vscode.postMessage({ type: 'openTask', taskId: task.id });
+				});
+			}
+			actions.appendChild(button);
+			const renameButton = document.createElement('button');
+			renameButton.type = 'button';
+			renameButton.className = 'secondary';
+			renameButton.textContent = 'Renomear';
+			renameButton.addEventListener('click', () => {
+				flushPendingFieldUpdates();
+				vscode.postMessage({ type: 'renameTask', taskId: task.id, label: task.label });
+			});
+			actions.appendChild(renameButton);
+			const deleteButton = document.createElement('button');
+			deleteButton.type = 'button';
+			deleteButton.className = 'secondary';
+			deleteButton.textContent = 'Excluir';
+			deleteButton.addEventListener('click', () => {
+				flushPendingFieldUpdates();
+				vscode.postMessage({ type: 'deleteTask', taskId: task.id });
+			});
+			actions.appendChild(deleteButton);
+			row.appendChild(meta);
+			row.appendChild(actions);
+			tasksList.appendChild(row);
+		});
 	}
 
 	function renderTemplateOptions() {
 		templateSelect.innerHTML = '';
-		if (!templates.length) {
+		if (!state.templates.length) {
 			const option = document.createElement('option');
 			option.value = '';
 			option.textContent = 'Nenhum template encontrado';
@@ -313,8 +898,7 @@ function getDiagramadorHtml(
 			templateSelect.disabled = true;
 			return;
 		}
-		templateSelect.disabled = false;
-		templates.forEach((template) => {
+		state.templates.forEach((template) => {
 			const option = document.createElement('option');
 			option.value = template.id;
 			option.textContent = template.name || template.id;
@@ -322,220 +906,472 @@ function getDiagramadorHtml(
 		});
 	}
 
-	function ensureTemplateSelection() {
-		if (!templates.length) {
-			project.templateId = '';
-			return;
+	function getSelectedTemplateId() {
+		if (state.selectedTemplateId && state.templates.some(template => template.id === state.selectedTemplateId)) {
+			return state.selectedTemplateId;
 		}
-		if (!project.templateId || !templates.some(template => template.id === project.templateId)) {
-			project.templateId = templates[0].id;
-		}
-	}
-
-	function setStatus(status) {
-		if (!status) {
-			statusEl.textContent = '';
-			statusEl.dataset.state = 'idle';
-			return;
-		}
-		statusEl.textContent = status.message || '';
-		statusEl.dataset.state = status.state || 'idle';
-	}
-
-	function ensureDoc() {
-		if (!project || typeof project !== 'object') {
-			project = { templateId: templates[0]?.id || '', doc: { title: '', model: '', text: '', members: [], keywords: [] } };
-		}
-		if (!project.templateId) {
-			project.templateId = templates[0]?.id || '';
-		}
-		if (!project.doc || typeof project.doc !== 'object') {
-			project.doc = { title: '', model: '', text: '', members: [], keywords: [] };
-		}
-		if (!Array.isArray(project.doc.members)) {
-			project.doc.members = [];
-		}
-		if (!Array.isArray(project.doc.keywords)) {
-			project.doc.keywords = [];
-		}
-		project.doc.title = typeof project.doc.title === 'string' ? project.doc.title : String(project.doc.title ?? '');
-		project.doc.model = typeof project.doc.model === 'string' ? project.doc.model : String(project.doc.model ?? '');
-		project.doc.text = typeof project.doc.text === 'string' ? project.doc.text : String(project.doc.text ?? '');
-		return project.doc;
-	}
-
-	function updateDoc(patch) {
-		vscode.postMessage({ type: 'updateDoc', patch });
+		return state.templates[0]?.id || '';
 	}
 
 	function renderTemplate() {
-		ensureDoc();
 		renderTemplateOptions();
-		ensureTemplateSelection();
-		const templateId = project.templateId;
-		const current = templates.find(template => template.id === templateId);
+		const selectedId = getSelectedTemplateId();
+		state.selectedTemplateId = selectedId;
+		const current = state.templates.find(template => template.id === selectedId);
 		templateTitleEl.textContent = current ? 'Template: ' + (current.name || current.id) : 'Template: -';
-		templateSelect.value = templateId || '';
+		templateSelect.value = selectedId || '';
+		templateSelect.disabled = !state.templates.length;
 	}
 
-	function renderMembers() {
-		const doc = ensureDoc();
-		membersList.innerHTML = '';
-		if (!doc.members.length) {
-			const empty = document.createElement('div');
-			empty.className = 'empty';
-			empty.textContent = 'Nenhum integrante adicionado.';
-			membersList.appendChild(empty);
+	function isMultilineKey(key) {
+		return /body|text|descricao|conteudo/i.test(key) && !/height|altura|tamanho|size/i.test(key);
+	}
+
+	function getFieldValue(key) {
+		if (!state.data || typeof state.data !== 'object') {
+			return undefined;
+		}
+		if (Object.prototype.hasOwnProperty.call(state.data, key)) {
+			return state.data[key];
+		}
+		return undefined;
+	}
+
+	function updateField(key, value, immediate) {
+		if (!isEditorEnabled()) {
 			return;
 		}
-		doc.members.forEach((member, index) => {
-			const row = document.createElement('div');
-			row.className = 'member-row';
-			const input = document.createElement('input');
-			input.type = 'text';
-			input.value = member || '';
-			input.addEventListener('input', () => {
-				const next = doc.members.slice();
-				next[index] = input.value;
-				doc.members = next;
-				updateDoc({ members: next });
-			});
-			const removeBtn = document.createElement('button');
-			removeBtn.type = 'button';
-			removeBtn.className = 'secondary';
-			removeBtn.textContent = 'Remover';
-			removeBtn.addEventListener('click', () => {
-				const next = doc.members.filter((_, idx) => idx !== index);
-				doc.members = next;
-				updateDoc({ members: next });
-				renderMembers();
-			});
-			row.appendChild(input);
-			row.appendChild(removeBtn);
-			membersList.appendChild(row);
+		state.data = { ...state.data, [key]: value };
+		if (immediate) {
+			const entry = pendingFieldUpdates.get(key);
+			if (entry) {
+				clearTimeout(entry.timer);
+				pendingFieldUpdates.delete(key);
+			}
+			sendFieldUpdate(key, value);
+			return;
+		}
+		queueFieldUpdate(key, value);
+	}
+
+	function renderFields() {
+		fieldsContainer.innerHTML = '';
+		fieldsHint.textContent = '';
+		if (!isEditorEnabled()) {
+			fieldsHint.textContent = 'Selecione uma tarefa para editar.';
+			return;
+		}
+		if (!state.schema.length) {
+			fieldsHint.textContent = 'Template sem schema.';
+			return;
+		}
+		state.schema.forEach((field) => {
+			const fieldEl = document.createElement('div');
+			fieldEl.className = 'field';
+			const label = document.createElement('label');
+			const inputId = 'field-' + field.key;
+			label.htmlFor = inputId;
+			label.textContent = field.label || field.key;
+			fieldEl.appendChild(label);
+			const value = getFieldValue(field.key);
+			if (field.type === 'boolean') {
+				const row = document.createElement('div');
+				row.className = 'checkbox-row';
+				const input = document.createElement('input');
+				input.type = 'checkbox';
+				input.id = inputId;
+				input.checked = value === true || value === 'true';
+				input.disabled = !isEditorEnabled();
+				input.addEventListener('change', () => {
+					updateField(field.key, input.checked, true);
+				});
+				row.appendChild(input);
+				fieldEl.appendChild(row);
+			} else if (field.type === 'string[]') {
+				const input = document.createElement('textarea');
+				input.id = inputId;
+				input.placeholder = '1 item por linha';
+				input.value = Array.isArray(value) ? value.join('\n') : (value === null || value === undefined ? '' : String(value));
+				input.disabled = !isEditorEnabled();
+				input.addEventListener('input', () => {
+					const lines = input.value.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+					updateField(field.key, lines);
+				});
+				input.addEventListener('blur', () => {
+					flushFieldUpdate(field.key);
+				});
+				fieldEl.appendChild(input);
+			} else if (field.type === 'number') {
+				const input = document.createElement('input');
+				input.id = inputId;
+				input.type = 'number';
+				input.step = 'any';
+				const parsed = typeof value === 'string' ? Number(value) : value;
+				input.value = Number.isFinite(parsed) ? String(parsed) : '';
+				input.disabled = !isEditorEnabled();
+				input.addEventListener('input', () => {
+					const raw = input.value.trim();
+					if (!raw) {
+						updateField(field.key, null);
+						return;
+					}
+					const parsed = Number(raw);
+					updateField(field.key, Number.isFinite(parsed) ? parsed : null);
+				});
+				input.addEventListener('blur', () => {
+					flushFieldUpdate(field.key);
+				});
+				fieldEl.appendChild(input);
+			} else if (field.type === 'latex') {
+				const input = document.createElement('textarea');
+				input.id = inputId;
+				input.placeholder = 'Aceita comandos LaTeX.';
+				input.value = typeof value === 'string' ? value : (value === null || value === undefined ? '' : String(value));
+				input.disabled = !isEditorEnabled();
+				input.addEventListener('input', () => {
+					updateField(field.key, input.value);
+				});
+				input.addEventListener('blur', () => {
+					flushFieldUpdate(field.key);
+				});
+				fieldEl.appendChild(input);
+			} else {
+				const multiline = isMultilineKey(field.key);
+				const input = multiline ? document.createElement('textarea') : document.createElement('input');
+				input.id = inputId;
+				if (!multiline) {
+					input.type = 'text';
+				}
+				input.value = typeof value === 'string' ? value : (value === null || value === undefined ? '' : String(value));
+				input.disabled = !isEditorEnabled();
+				input.addEventListener('input', () => {
+					updateField(field.key, input.value);
+				});
+				input.addEventListener('blur', () => {
+					flushFieldUpdate(field.key);
+				});
+				fieldEl.appendChild(input);
+			}
+			fieldsContainer.appendChild(fieldEl);
 		});
 	}
 
-	function renderKeywords() {
-		const doc = ensureDoc();
-		keywordsList.innerHTML = '';
-		if (!doc.keywords.length) {
-			const empty = document.createElement('div');
-			empty.className = 'empty';
-			empty.textContent = 'Nenhuma palavra-chave adicionada.';
-			keywordsList.appendChild(empty);
-			return;
-		}
-		doc.keywords.forEach((keyword, index) => {
-			const chip = document.createElement('div');
-			chip.className = 'chip';
-			const label = document.createElement('span');
-			label.textContent = keyword;
-			const removeBtn = document.createElement('button');
-			removeBtn.type = 'button';
-			removeBtn.textContent = 'x';
-			removeBtn.addEventListener('click', () => {
-				const next = doc.keywords.filter((_, idx) => idx !== index);
-				doc.keywords = next;
-				updateDoc({ keywords: next });
-				renderKeywords();
-			});
-			chip.appendChild(label);
-			chip.appendChild(removeBtn);
-			keywordsList.appendChild(chip);
-		});
+	function setTemplateStatus(status) {
+		const nextState = status?.state || 'idle';
+		const message = status?.message || (nextState === 'building'
+			? 'Gerando PDF...'
+			: nextState === 'success'
+				? 'PDF atualizado'
+				: nextState === 'error'
+					? 'Falha ao gerar PDF'
+					: 'Aguardando alteracoes');
+		templateStatusEl.textContent = message;
+		templateStatusEl.dataset.state = nextState;
 	}
 
-	function renderDoc() {
-		const doc = ensureDoc();
-		titleInput.value = doc.title || '';
-		modelInput.value = doc.model || '';
-		textInput.value = doc.text || '';
-		renderMembers();
-		renderKeywords();
+	function setTemplateError(message) {
+		templateErrorEl.textContent = message || '';
 	}
+
+	function setBuildError(message, logPath) {
+		buildErrorEl.textContent = message || '';
+		const hasLog = Boolean(logPath);
+		buildLogButton.classList.toggle('hidden', !hasLog);
+		buildLogButton.disabled = !hasLog;
+	}
+
+	function setTemplateBuildError(message, logPath) {
+		templateBuildErrorEl.textContent = message || '';
+		const hasLog = Boolean(logPath);
+		templateBuildLogButton.classList.toggle('hidden', !hasLog);
+		templateBuildLogButton.disabled = !hasLog;
+	}
+
+	function refreshTemplateDraft(editor) {
+		const template = editor?.template;
+		const revision = typeof editor?.revision === 'number' ? editor.revision : 0;
+		const nextId = template?.manifest?.id || '';
+		if (!templateDirty || templateDraftId !== nextId || templateDraftRevision !== revision) {
+			templateDraftId = nextId;
+			templateDraftRevision = revision;
+			templateDraft = {
+				manifestText: template ? JSON.stringify(template.manifest || {}, null, 2) : '',
+				mainTex: template ? template.mainTex || '' : '',
+				previewText: template ? JSON.stringify(template.previewData || {}, null, 2) : ''
+			};
+			templateDirty = false;
+		}
+	}
+
+	function confirmDiscardTemplateChanges() {
+		if (!templateDirty) {
+			return true;
+		}
+		const ok = window.confirm('Ha alteracoes nao salvas no template atual. Deseja descartar?');
+		if (!ok) {
+			return false;
+		}
+		templateDirty = false;
+		return true;
+	}
+
+	function validateJsonInput(text, errorEl) {
+		if (!errorEl) {
+			return true;
+		}
+		if (!text.trim()) {
+			errorEl.textContent = '';
+			return true;
+		}
+		try {
+			JSON.parse(text);
+			errorEl.textContent = '';
+			return true;
+		} catch {
+			errorEl.textContent = 'JSON invalido.';
+			return false;
+		}
+	}
+
+	function validateTemplateDraft() {
+		const manifestOk = validateJsonInput(templateManifestInput.value, templateManifestErrorEl);
+		const previewOk = validateJsonInput(templatePreviewInput.value, templatePreviewErrorEl);
+		return manifestOk && previewOk;
+	}
+
+	function renderTemplateEditor() {
+		const editor = state.templateEditor || {};
+		const template = editor.template;
+		const selectedId = editor.selectedTemplateId || template?.manifest?.id || '';
+		templateEditorSelect.innerHTML = '';
+		if (!state.templates.length) {
+			const option = document.createElement('option');
+			option.value = '';
+			option.textContent = 'Nenhum template encontrado';
+			templateEditorSelect.appendChild(option);
+			templateEditorSelect.disabled = true;
+		} else {
+			state.templates.forEach((entry) => {
+				const option = document.createElement('option');
+				option.value = entry.id;
+				option.textContent = entry.name || entry.id;
+				templateEditorSelect.appendChild(option);
+			});
+			templateEditorSelect.disabled = false;
+			templateEditorSelect.value = selectedId || state.templates[0].id;
+		}
+
+		const isReadOnly = Boolean(template?.readOnly);
+		const hasTemplate = Boolean(template);
+		const editable = hasTemplate && !isReadOnly;
+		templateCreateButton.disabled = false;
+		templateDuplicateButton.disabled = !hasTemplate;
+		templateDeleteButton.disabled = !hasTemplate || isReadOnly;
+		templateExportButton.disabled = !hasTemplate;
+		templateImportButton.disabled = false;
+		templateSaveButton.disabled = !editable;
+		templateManifestInput.disabled = !editable;
+		templateMainTexInput.disabled = !editable;
+		templatePreviewInput.disabled = !editable;
+		templateAddAssetButton.disabled = !editable;
+		templateAssetInput.disabled = !editable;
+
+		refreshTemplateDraft(editor);
+		templateManifestInput.value = templateDraft.manifestText;
+		templateMainTexInput.value = templateDraft.mainTex;
+		templatePreviewInput.value = templateDraft.previewText;
+		validateTemplateDraft();
+
+		templateAssetsList.innerHTML = '';
+		if (!template || !Array.isArray(template.assets) || template.assets.length === 0) {
+			const empty = document.createElement('div');
+			empty.className = 'empty';
+			empty.textContent = 'Nenhum asset.';
+			templateAssetsList.appendChild(empty);
+		} else {
+			template.assets.forEach((asset) => {
+				const row = document.createElement('div');
+				row.className = 'asset-item';
+				const name = document.createElement('div');
+				name.textContent = asset;
+				const button = document.createElement('button');
+				button.type = 'button';
+				button.className = 'secondary';
+				button.textContent = 'Remover';
+				button.disabled = !editable;
+				button.addEventListener('click', () => {
+					vscode.postMessage({ type: 'templateDeleteAsset', name: asset });
+				});
+				row.appendChild(name);
+				row.appendChild(button);
+				templateAssetsList.appendChild(row);
+			});
+		}
+
+		setTemplateStatus(editor.status);
+		setTemplateError(editor.error);
+		setTemplateBuildError(editor.buildError, editor.buildLogPath);
+	}
+
+	function setStatus(status) {
+		const nextState = status?.state || 'idle';
+		const message = status?.message || (nextState === 'building'
+			? 'Gerando PDF...'
+			: nextState === 'success'
+				? 'PDF atualizado'
+				: nextState === 'error'
+					? 'Falha ao gerar PDF'
+					: 'Aguardando alteracoes');
+		statusEl.textContent = message;
+		statusEl.dataset.state = nextState;
+	}
+
+	function renderAll() {
+		applyActiveTab(activeTab, false);
+		renderTasks();
+		renderTemplate();
+		renderFields();
+		renderTemplateEditor();
+		setStatus(state.status);
+		setBuildError(state.buildError, state.buildLogPath);
+	}
+
+	newTaskButton.addEventListener('click', () => {
+		flushPendingFieldUpdates();
+		const templateId = templateSelect.value || state.selectedTemplateId || '';
+		vscode.postMessage({ type: 'createTask', templateId });
+	});
 
 	templateSelect.addEventListener('change', () => {
 		const value = templateSelect.value;
-		if (project.templateId === value) {
+		if (value === state.selectedTemplateId) {
 			return;
 		}
-		project.templateId = value;
-		renderTemplate();
+		flushPendingFieldUpdates();
+		state.selectedTemplateId = value;
 		vscode.postMessage({ type: 'updateTemplate', templateId: value });
 	});
 
-	titleInput.addEventListener('input', () => {
-		const doc = ensureDoc();
-		doc.title = titleInput.value;
-		updateDoc({ title: titleInput.value });
+	tabDocument.addEventListener('click', () => {
+		flushPendingFieldUpdates();
+		applyActiveTab('document', true);
 	});
 
-	modelInput.addEventListener('input', () => {
-		const doc = ensureDoc();
-		doc.model = modelInput.value;
-		updateDoc({ model: modelInput.value });
+	tabTemplates.addEventListener('click', () => {
+		flushPendingFieldUpdates();
+		applyActiveTab('templates', true);
 	});
 
-	textInput.addEventListener('input', () => {
-		const doc = ensureDoc();
-		doc.text = textInput.value;
-		updateDoc({ text: textInput.value });
-	});
-
-	addMemberBtn.addEventListener('click', () => {
-		const doc = ensureDoc();
-		const next = doc.members.slice();
-		next.push('');
-		doc.members = next;
-		updateDoc({ members: next });
-		renderMembers();
-	});
-
-	keywordInput.addEventListener('keydown', (event) => {
-		if (event.key !== 'Enter') {
-			return;
-		}
-		event.preventDefault();
-		const value = keywordInput.value.trim();
+	templateEditorSelect.addEventListener('change', () => {
+		const value = templateEditorSelect.value;
 		if (!value) {
 			return;
 		}
-		const doc = ensureDoc();
-		const next = doc.keywords.slice();
-		next.push(value);
-		doc.keywords = next;
-		keywordInput.value = '';
-		updateDoc({ keywords: next });
-		renderKeywords();
+		if (value === state.templateEditor?.selectedTemplateId) {
+			return;
+		}
+		if (!confirmDiscardTemplateChanges()) {
+			templateEditorSelect.value = state.templateEditor?.selectedTemplateId || '';
+			return;
+		}
+		templateDirty = false;
+		vscode.postMessage({ type: 'templateSelect', templateId: value });
+	});
+
+	templateCreateButton.addEventListener('click', () => {
+		if (!confirmDiscardTemplateChanges()) {
+			return;
+		}
+		vscode.postMessage({ type: 'templateCreate' });
+	});
+
+	templateDuplicateButton.addEventListener('click', () => {
+		if (!confirmDiscardTemplateChanges()) {
+			return;
+		}
+		vscode.postMessage({ type: 'templateDuplicate' });
+	});
+
+	templateDeleteButton.addEventListener('click', () => {
+		if (!confirmDiscardTemplateChanges()) {
+			return;
+		}
+		vscode.postMessage({ type: 'templateDelete' });
+	});
+
+	templateExportButton.addEventListener('click', () => {
+		vscode.postMessage({ type: 'templateExport' });
+	});
+
+	templateImportButton.addEventListener('click', () => {
+		if (!confirmDiscardTemplateChanges()) {
+			return;
+		}
+		vscode.postMessage({ type: 'templateImport' });
+	});
+
+	templateSaveButton.addEventListener('click', () => {
+		if (!validateTemplateDraft()) {
+			return;
+		}
+		vscode.postMessage({
+			type: 'templateSave',
+			manifestText: templateManifestInput.value,
+			mainTex: templateMainTexInput.value,
+			previewText: templatePreviewInput.value,
+			previousId: templateDraftId
+		});
+	});
+
+	buildLogButton.addEventListener('click', () => {
+		vscode.postMessage({ type: 'openBuildLog', scope: 'document' });
+	});
+
+	templateBuildLogButton.addEventListener('click', () => {
+		vscode.postMessage({ type: 'openBuildLog', scope: 'template' });
+	});
+
+	templateManifestInput.addEventListener('input', () => {
+		templateDraft.manifestText = templateManifestInput.value;
+		templateDirty = true;
+		validateJsonInput(templateManifestInput.value, templateManifestErrorEl);
+	});
+
+	templateMainTexInput.addEventListener('input', () => {
+		templateDraft.mainTex = templateMainTexInput.value;
+		templateDirty = true;
+	});
+
+	templatePreviewInput.addEventListener('input', () => {
+		templateDraft.previewText = templatePreviewInput.value;
+		templateDirty = true;
+		validateJsonInput(templatePreviewInput.value, templatePreviewErrorEl);
+	});
+
+	templateAddAssetButton.addEventListener('click', () => {
+		templateAssetInput.click();
+	});
+
+	templateAssetInput.addEventListener('change', async () => {
+		const files = Array.from(templateAssetInput.files || []);
+		for (const file of files) {
+			const base64 = await readFileAsBase64(file);
+			if (!base64) {
+				continue;
+			}
+			vscode.postMessage({ type: 'templateAddAsset', name: file.name, contents: base64 });
+		}
+		templateAssetInput.value = '';
 	});
 
 	window.addEventListener('message', (event) => {
 		const msg = event.data;
-		if (msg.type === 'templates') {
-			setTemplates(msg.templates);
-			const previous = project.templateId;
-			renderTemplate();
-			if (project.templateId && project.templateId !== previous) {
-				vscode.postMessage({ type: 'updateTemplate', templateId: project.templateId });
-			}
-		}
-		if (msg.type === 'project') {
-			const previous = project?.templateId;
-			project = msg.project;
-			renderTemplate();
-			renderDoc();
-			if (project?.templateId && project.templateId !== previous) {
-				vscode.postMessage({ type: 'updateTemplate', templateId: project.templateId });
-			}
-		}
-		if (msg.type === 'status') {
-			setStatus(msg.status);
+		if (msg.type === 'state') {
+			setState(msg.state);
 		}
 	});
 
-	renderTemplate();
-	renderDoc();
+	setState(state);
 	vscode.postMessage({ type: 'ready' });
 </script>
 </body>

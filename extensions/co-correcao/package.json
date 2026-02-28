@@ -1,0 +1,72 @@
+{
+	"name": "co-correcao",
+	"displayName": "%displayName%",
+	"description": "%description%",
+	"icon": "resources/co-view.svg",
+	"publisher": "odebrino",
+	"version": "0.0.1",
+	"license": "MIT",
+	"engines": {
+		"vscode": "^1.90.0"
+	},
+	"categories": [
+		"Other"
+	],
+	"main": "./out/extension.js",
+	"activationEvents": [
+		"onView:co.correcao.mainView",
+		"onCommand:coCorrecao.openTaskPdf",
+		"onCommand:coCorrecao.newRevision",
+		"onCommand:coCorrecao.selectRevision",
+		"onCommand:coCorrecao.acceptSuggestion",
+		"onCommand:coCorrecao.rejectSuggestion"
+	],
+	"capabilities": {
+		"virtualWorkspaces": true,
+		"untrustedWorkspaces": {
+			"supported": true
+		}
+	},
+	"dependencies": {
+		"co-doc-core": "file:../../packages/co-doc-core",
+		"co-preview-core": "file:../../packages/co-preview-core",
+		"co-storage-core": "file:../../packages/co-storage-core",
+		"co-template-core": "file:../../packages/co-template-core"
+	},
+	"contributes": {
+		"commands": [
+			{ "command": "coCorrecao.openTaskPdf", "title": "%coCorrecao.openTaskPdf.title%" },
+			{ "command": "coCorrecao.newRevision", "title": "%coCorrecao.newRevision.title%" },
+			{ "command": "coCorrecao.selectRevision", "title": "%coCorrecao.selectRevision.title%" },
+			{ "command": "coCorrecao.acceptSuggestion", "title": "%coCorrecao.acceptSuggestion.title%" },
+			{ "command": "coCorrecao.rejectSuggestion", "title": "%coCorrecao.rejectSuggestion.title%" }
+		],
+		"menus": {
+			"commandPalette": [
+				{ "command": "coCorrecao.openTaskPdf" },
+				{ "command": "coCorrecao.newRevision" }
+			]
+		},
+		"viewsContainers": {
+			"activitybar": [
+				{
+					"id": "co-correcao",
+					"title": "%correcao.activity.title%",
+					"icon": "resources/co-view.svg"
+				}
+			]
+		},
+		"views": {
+			"co-correcao": [
+				{
+					"id": "co.correcao.mainView",
+					"name": "%coCorrecao.view.title%",
+					"type": "webview"
+				}
+			]
+		}
+	},
+	"devDependencies": {
+		"@types/node": "^22.18.10"
+	}
+}

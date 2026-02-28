@@ -7,10 +7,13 @@ import * as vscode from 'vscode';
 import path from 'path';
 import os from 'os';
 import fs from 'fs/promises';
-import { spawn } from 'child_process';
+import * as fsSync from 'fs';
+import * as yauzl from 'yauzl';
+import * as yazl from 'yazl';
 import {
 	TemplateBuildResult,
 	TemplateBuildService,
+	TemplateFieldSchema,
 	TemplateManifest,
 	TemplatePackage,
 	TemplateStoragePaths,
@@ -18,18 +21,24 @@ import {
 	loadTemplate,
 	listTemplates,
 	resolveTemplateStoragePaths,
-	saveTemplate
+	resolveTectonicBundlePath,
+	saveTemplate,
+	validateTemplate
 } from 'co-template-core';
 import {
+	migrateLegacyProject,
+	parseProject,
+	serializeProject
+} from 'co-doc-core';
+import { LocalStorageProvider } from 'co-storage-core';
+import {
 	createDefaultProject,
-	createTemplateData,
 	DEFAULT_TEMPLATE_ID,
 	DiagramadorProject,
-	parseProject,
-	TEMPLATE_TEST_V0,
-	serializeProject
+	TEMPLATE_TEST_V0
 } from './diagramador';
-import { DiagramadorStatus, DiagramadorViewProvider, registerDiagramadorView } from './webview';
+import { DiagramadorStatus, DiagramadorTaskSummary, DiagramadorViewProvider, registerDiagramadorView } from './webview';
+import { PdfPreviewManager } from 'co-preview-core';
 
 export async function activate(context: vscode.ExtensionContext) {
 	const diagramadorController = new DiagramadorController(context);
@@ -37,7 +46,7 @@ export async function activate(context: vscode.ExtensionContext) {
 	const diagramadorProvider = registerDiagramadorView(
 		context,
 		(message) => diagramadorController?.handleMessage(message),
-		() => diagramadorController?.getProject() ?? createDefaultProject(),
+		() => diagramadorController.getState(),
 		() => diagramadorController?.onViewVisible()
 	);
 	diagramadorController.setViewProvider(diagramadorProvider);
@@ -53,20 +62,12 @@ export async function activate(context: vscode.ExtensionContext) {
 type DiagramadorPaths = {
 	baseDir: string;
 	projectPath: string;
+	tasksDir: string;
 	outDir: string;
+	templatePreviewDir: string;
 	previewTexPath: string;
 	previewPdfPath: string;
 	buildLogPath: string;
-};
-
-type PdfJsPaths = {
-	root: string;
-	pdfJsPath: string;
-	pdfWorkerPath: string;
-	viewerPath: string;
-	viewerCssPath: string;
-	cMapDir: string;
-	standardFontsDir: string;
 };
 
 const FONT_BLOCK_PATTERN = /% ========= Fonte[\s\S]*?% ========= Variaveis =========/;
@@ -80,89 +81,265 @@ const OPTIMIZED_FONT_BLOCK = String.raw`% ========= Fonte (depois do titulo) ===
 
 % ========= Variaveis =========`;
 
+const PROJECT_FILE_NAME = 'project.json';
+const TASKS_DIR_NAME = 'tarefas';
+const OUT_DIR_NAME = 'out';
+const PREVIEW_TEX_NAME = 'main.tex';
+const PREVIEW_PDF_NAME = 'preview.pdf';
+const BUILD_LOG_NAME = 'build.log';
+const TEMPLATE_PREVIEW_DIR_NAME = 'template-preview';
+
+const DEFAULT_TEMPLATE_SCHEMA: TemplateFieldSchema[] = [
+	{ key: 'Title', type: 'string', label: 'Titulo' },
+	{ key: 'Members', type: 'string[]', label: 'Integrantes' }
+];
+
+const DEFAULT_TEMPLATE_PREVIEW = {
+	Title: 'Modelo de Template',
+	Members: ['Integrante 1', 'Integrante 2']
+};
+
+const DEFAULT_TEMPLATE_SOURCE = String.raw`\documentclass[12pt]{article}
+\usepackage[utf8]{inputenc}
+\usepackage{parskip}
+\usepackage{geometry}
+\geometry{a4paper, margin=2.5cm}
+
+\input{co_data.tex}
+
+\begin{document}
+\section*{\Title}
+
+\textbf{Integrantes}\\
+\Members
+
+\end{document}`;
+
 class DiagramadorController implements vscode.Disposable {
 	private project: DiagramadorProject = createDefaultProject();
+	private status: DiagramadorStatus = { state: 'idle' };
+	private buildError?: string;
+	private buildLogPath?: string;
+	private templateStatus: DiagramadorStatus = { state: 'idle' };
+	private templateError?: string;
+	private templateBuildError?: string;
+	private templateBuildLogPath?: string;
 	private readonly paths: DiagramadorPaths;
+	private readonly storage: LocalStorageProvider;
 	private viewProvider?: DiagramadorViewProvider;
 	private readonly buildService: TemplateBuildService;
-	private readonly previewManager: DiagramadorPreviewManager;
+	private readonly templateBuildService: TemplateBuildService;
+	private readonly previewManager: PdfPreviewManager;
+	private readonly templatePreviewManager: PdfPreviewManager;
 	private readonly output: vscode.OutputChannel;
 	private readonly templateStorage: TemplateStoragePaths;
 	private readonly headerImagePath: string;
 	private readonly headerImageName = 'modelo_header_image1.jpg';
 	private templates: TemplateSummary[] = [];
+	private currentSchema: TemplateFieldSchema[] = [];
+	private tasks: DiagramadorTaskSummary[] = [];
+	private currentTaskId?: string;
+	private editorTemplate?: TemplatePackage;
+	private editorAssets: string[] = [];
+	private editorRevision = 0;
 	private readonly templateCache = new Map<string, TemplatePackage>();
 	private initialized = false;
 	private bundlePath?: string;
+	private activeTab: 'document' | 'templates' = 'document';
 
 	constructor(private readonly context: vscode.ExtensionContext) {
 		const extensionRoot = context.extensionUri.fsPath;
 		const globalStoragePath = context.globalStorageUri.fsPath;
-		this.paths = resolveDiagramadorPaths();
+		const baseDir = resolveDiagramadorBaseDir(context);
+		this.paths = resolveDiagramadorPaths(baseDir);
+		this.storage = new LocalStorageProvider(baseDir);
 		this.output = vscode.window.createOutputChannel('Diagramador');
 		this.headerImagePath = path.join(extensionRoot, 'resources', this.headerImageName);
 		this.templateStorage = resolveTemplateStoragePaths(globalStoragePath, path.resolve(extensionRoot, '..', '..'));
 		this.buildService = new TemplateBuildService({
-			debounceMs: 1500,
+			debounceMs: 900,
 			onStatus: status => this.handleStatus(status),
 			onComplete: result => this.handleBuildResult(result)
 		});
-		this.previewManager = new DiagramadorPreviewManager(this.output, extensionRoot, vscode.env.appName);
+		this.templateBuildService = new TemplateBuildService({
+			debounceMs: 900,
+			onStatus: status => this.handleTemplateStatus(status),
+			onComplete: result => this.handleTemplateBuildResult(result)
+		});
+		this.previewManager = new PdfPreviewManager(this.output, {
+			extensionRoot,
+			appName: vscode.env.appName,
+			title: 'Diagramador Preview',
+			viewType: 'co.diagramador.preview'
+		});
+		this.templatePreviewManager = new PdfPreviewManager(this.output, {
+			extensionRoot,
+			appName: vscode.env.appName,
+			title: 'Template Preview',
+			viewType: 'co.diagramador.templatePreview'
+		});
 	}
 
 	async initialize() {
-		await ensureDiagramadorDirs(this.paths);
+		await ensureDiagramadorDirs(this.storage);
 		await this.resolveBundlePath();
-		this.project = await loadDiagramadorProject(this.paths);
+		await this.migrateLegacyProject();
+		await this.refreshTasks();
+		this.project = createDefaultProject();
 		await this.ensureDefaultTemplate();
 		const selectionChanged = await this.refreshTemplates();
 		this.initialized = true;
-		this.viewProvider?.sendProject(this.project);
-		this.viewProvider?.sendTemplates(this.templates);
-		if (selectionChanged) {
-			await saveDiagramadorProject(this.paths, this.project);
+		this.viewProvider?.sendState(this.getState());
+		if (selectionChanged && this.currentTaskId) {
+			await this.saveAndBuild();
 		}
-		await this.scheduleBuild();
+		await this.scheduleTemplateBuild();
 	}
 
 	setViewProvider(provider: DiagramadorViewProvider) {
 		this.viewProvider = provider;
 		if (this.initialized) {
-			this.viewProvider.sendProject(this.project);
-			this.viewProvider.sendTemplates(this.templates);
+			this.viewProvider.sendState(this.getState());
 		}
 	}
 
-	getProject() {
-		return this.project;
+	getState() {
+		return {
+			templates: this.templates,
+			selectedTemplateId: this.project.templateId,
+			schema: this.currentSchema,
+			data: this.project.data ?? {},
+			status: this.status,
+			buildError: this.buildError,
+			buildLogPath: this.buildLogPath,
+			tasks: this.tasks,
+			currentTaskId: this.currentTaskId,
+			activeTab: this.activeTab,
+			templateEditor: {
+				selectedTemplateId: this.editorTemplate?.manifest.id ?? '',
+				template: this.editorTemplate
+					? {
+						manifest: this.editorTemplate.manifest,
+						mainTex: this.editorTemplate.mainTex,
+						previewData: this.editorTemplate.previewData,
+						readOnly: this.editorTemplate.readOnly,
+						assets: this.editorAssets
+					}
+					: undefined,
+				status: this.templateStatus,
+				error: this.templateError,
+				buildError: this.templateBuildError,
+				buildLogPath: this.templateBuildLogPath,
+				revision: this.editorRevision
+			}
+		};
 	}
 
 	async open() {
 		await this.ensureInitialized();
 		await this.revealView();
-		await this.previewManager.open(this.paths.previewPdfPath);
+		await this.refreshTasks();
 	}
 
 	onViewVisible() {
 		void this.refreshTemplates();
-		void this.previewManager.open(this.paths.previewPdfPath);
+		void this.refreshTasks();
+		void this.scheduleTemplateBuild();
 	}
 
 	async handleMessage(message: any) {
-		switch (message?.type) {
-			case 'ready':
-				this.viewProvider?.sendProject(this.project);
-				this.viewProvider?.sendTemplates(this.templates);
-				return;
-			case 'updateTemplate':
-				await this.updateTemplate(message?.templateId);
-				return;
-			case 'updateDoc':
-				await this.updateDoc(message?.patch);
-				return;
-			default:
-				return;
+		try {
+			await this.ensureInitialized();
+			switch (message?.type) {
+				case 'ready':
+					this.viewProvider?.sendState(this.getState());
+					return;
+				case 'setTab':
+					this.setActiveTab(message?.tab);
+					return;
+				case 'openTask':
+					await this.openTask(message?.taskId);
+					return;
+				case 'createTask':
+					await this.createTask(typeof message?.templateId === 'string' ? message.templateId : undefined);
+					return;
+				case 'renameTask':
+					await this.renameTask(message?.taskId, message?.label);
+					return;
+				case 'deleteTask':
+					await this.deleteTask(message?.taskId);
+					return;
+				case 'updateTemplate':
+					await this.updateTemplate(message?.templateId);
+					return;
+				case 'updateField':
+					await this.updateField(message?.key, message?.value);
+					return;
+				case 'templateSelect':
+					await this.selectEditorTemplate(message?.templateId);
+					return;
+				case 'templateCreate':
+					await this.createEditorTemplate();
+					return;
+				case 'templateDuplicate':
+					await this.duplicateEditorTemplate();
+					return;
+				case 'templateDelete':
+					await this.deleteEditorTemplate();
+					return;
+				case 'templateExport':
+					await this.exportEditorTemplate();
+					return;
+				case 'templateImport':
+					await this.importEditorTemplateZip();
+					return;
+				case 'templateSave':
+					await this.saveEditorTemplateDraft(message);
+					return;
+				case 'templateAddAsset':
+					await this.addEditorAsset(message?.name, message?.contents);
+					return;
+				case 'templateDeleteAsset':
+					await this.deleteEditorAsset(message?.name);
+					return;
+				case 'openBuildLog':
+					await this.openBuildLog(message?.scope);
+					return;
+				default:
+					return;
+			}
+		} catch (err) {
+			const details = err instanceof Error ? err.message : String(err);
+			this.output.appendLine(`[${new Date().toISOString()}] Falha ao processar acao: ${details}`);
+			void vscode.window.showErrorMessage(`Falha ao processar acao: ${details}`);
+			this.viewProvider?.sendState(this.getState());
 		}
+	}
+
+	private setActiveTab(tab: any) {
+		if (tab !== 'document' && tab !== 'templates') {
+			return;
+		}
+		if (this.activeTab === tab) {
+			return;
+		}
+		this.activeTab = tab;
+		this.viewProvider?.sendState(this.getState());
+		if (tab === 'document') {
+			void this.previewManager.open(this.paths.previewPdfPath);
+		} else {
+			void this.openTemplatePreview();
+		}
+	}
+
+	private async openBuildLog(scope: unknown) {
+		const target = scope === 'template' ? this.templateBuildLogPath : this.buildLogPath;
+		if (!target || !await fileExists(target)) {
+			await vscode.window.showWarningMessage('Log nao encontrado.');
+			return;
+		}
+		const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(target));
+		await vscode.window.showTextDocument(doc, { preview: true, viewColumn: vscode.ViewColumn.Beside });
 	}
 
 	private async ensureInitialized() {
@@ -196,55 +373,432 @@ class DiagramadorController implements vscode.Disposable {
 			return;
 		}
 		if (this.project.templateId === normalized) {
+			await this.ensureTemplateReady(normalized);
+			this.viewProvider?.sendState(this.getState());
 			return;
 		}
 		this.project.templateId = normalized;
-		await this.saveAndBuild();
+		const template = await this.ensureTemplateReady(normalized);
+		this.viewProvider?.sendState(this.getState());
+		await this.saveAndBuild(template);
 	}
 
-	private async updateDoc(patch: any) {
-		if (!patch || typeof patch !== 'object') {
+	private async updateField(key: any, value: any) {
+		if (typeof key !== 'string' || !key.trim()) {
 			return;
 		}
-		const doc = this.project.doc ?? createDefaultProject().doc;
-		if (typeof patch.title === 'string') {
-			doc.title = patch.title;
+		const schemaEntry = this.currentSchema.find(entry => entry.key === key);
+		const nextData = { ...(this.project.data ?? {}) };
+		const normalizedValue = normalizeFieldValue(schemaEntry?.type, value);
+		if (normalizedValue === undefined) {
+			delete nextData[key];
+		} else {
+			nextData[key] = normalizedValue;
 		}
-		if (typeof patch.model === 'string') {
-			doc.model = patch.model;
-		}
-		if (typeof patch.text === 'string') {
-			doc.text = patch.text;
-		}
-		if (Array.isArray(patch.members)) {
-			doc.members = patch.members.map((entry: any) => entry === null || entry === undefined ? '' : String(entry));
-		}
-		if (Array.isArray(patch.keywords)) {
-			doc.keywords = patch.keywords.map((entry: any) => entry === null || entry === undefined ? '' : String(entry));
-		}
-		this.project.doc = doc;
+		this.project.data = nextData;
 		await this.saveAndBuild();
 	}
 
-	private async saveAndBuild() {
-		await ensureDiagramadorDirs(this.paths);
-		await saveDiagramadorProject(this.paths, this.project);
-		await this.scheduleBuild();
+	private async saveAndBuild(template?: TemplatePackage) {
+		if (!this.currentTaskId) {
+			return;
+		}
+		await ensureDiagramadorDirs(this.storage);
+		const resolvedTemplate = template ?? await this.ensureTemplateReady(this.project.templateId);
+		await saveDiagramadorTask(this.storage, this.currentTaskId, this.project);
+		await this.refreshTasks();
+		await this.scheduleBuild(resolvedTemplate);
 	}
 
-	private async scheduleBuild() {
-		const template = await this.getTemplatePackage(this.project.templateId);
-		if (!template) {
+	private async scheduleBuild(template?: TemplatePackage) {
+		if (!this.currentTaskId) {
+			return;
+		}
+		const resolvedTemplate = template ?? await this.ensureTemplateReady(this.project.templateId);
+		if (!resolvedTemplate) {
 			this.handleStatus({ state: 'error', message: 'Template nao encontrado.' });
 			return;
 		}
-		const previewData = createTemplateData(this.project);
+		const fastBuild = this.getFastBuildSetting();
 		this.buildService.schedule({
-			template,
-			previewData,
+			template: resolvedTemplate,
+			previewData: this.project.data ?? {},
 			outDir: this.paths.outDir,
-			fast: true
+			fast: fastBuild
 		});
+	}
+
+	private getFastBuildSetting() {
+		return vscode.workspace.getConfiguration('co.diagramador').get<boolean>('fastBuild', true);
+	}
+
+	private async selectEditorTemplate(templateId: any, options?: { silent?: boolean; skipBuild?: boolean }) {
+		const normalized = typeof templateId === 'string' ? templateId.trim() : '';
+		if (!normalized) {
+			return;
+		}
+		const template = await loadTemplate(this.templateStorage, normalized);
+		if (!template) {
+			return;
+		}
+		this.editorTemplate = template;
+		this.templateError = undefined;
+		await this.refreshEditorAssets();
+		if (!options?.silent) {
+			this.viewProvider?.sendState(this.getState());
+		}
+		if (!options?.skipBuild) {
+			await this.scheduleTemplateBuild();
+		}
+		if (this.activeTab === 'templates') {
+			await this.openTemplatePreview();
+		}
+	}
+
+	private async createEditorTemplate() {
+		const id = await this.getUniqueTemplateId('novo-template');
+		const manifest: TemplateManifest = {
+			id,
+			name: 'Novo Template',
+			version: '0.1.0',
+			description: 'Template em branco',
+			entry: 'main.tex',
+			schema: DEFAULT_TEMPLATE_SCHEMA.map(field => ({ ...field })),
+			defaults: { ...DEFAULT_TEMPLATE_PREVIEW }
+		};
+		const saved = await saveTemplate(this.templateStorage, {
+			manifest,
+			mainTex: DEFAULT_TEMPLATE_SOURCE,
+			previewData: { ...DEFAULT_TEMPLATE_PREVIEW }
+		});
+		this.editorTemplate = saved;
+		this.editorRevision += 1;
+		await this.refreshTemplates();
+		await this.scheduleTemplateBuild();
+	}
+
+	private async duplicateEditorTemplate() {
+		const base = this.editorTemplate;
+		if (!base) {
+			return;
+		}
+		const id = await this.getUniqueTemplateId(`${base.manifest.id}-copia`);
+		const manifest: TemplateManifest = {
+			...base.manifest,
+			id,
+			name: `${base.manifest.name} (copia)`
+		};
+		const saved = await saveTemplate(this.templateStorage, {
+			manifest,
+			mainTex: base.mainTex,
+			previewData: cloneData(base.previewData)
+		});
+		await copyAssets(base.assetsDir, saved.assetsDir);
+		this.editorTemplate = saved;
+		this.editorRevision += 1;
+		await this.refreshTemplates();
+		await this.scheduleTemplateBuild();
+	}
+
+	private async deleteEditorTemplate() {
+		const current = this.editorTemplate;
+		if (!current || current.readOnly) {
+			return;
+		}
+		const wasCurrentTemplate = current.manifest.id === this.project.templateId;
+		const previousTemplateId = this.project.templateId;
+		const confirmation = await vscode.window.showWarningMessage(
+			wasCurrentTemplate
+				? `Excluir template "${current.manifest.name}"? Ele esta em uso no documento atual e sera substituido.`
+				: `Excluir template "${current.manifest.name}"?`,
+			{ modal: true },
+			'Excluir',
+			'Cancelar'
+		);
+		if (confirmation !== 'Excluir') {
+			return;
+		}
+		await fs.rm(current.dir, { recursive: true, force: true });
+		this.editorTemplate = undefined;
+		this.editorAssets = [];
+		await this.refreshTemplates();
+		const templateChanged = this.project.templateId !== previousTemplateId;
+		if (templateChanged && this.currentTaskId) {
+			await this.saveAndBuild();
+		}
+		if (templateChanged && wasCurrentTemplate) {
+			const nextTemplate = this.templates.find(template => template.id === this.project.templateId);
+			const nextName = nextTemplate?.name || this.project.templateId;
+			await vscode.window.showInformationMessage(`Template atual foi substituido por "${nextName}".`);
+		}
+		await this.scheduleTemplateBuild();
+	}
+
+	private async exportEditorTemplate() {
+		if (!this.editorTemplate) {
+			return;
+		}
+		const target = await vscode.window.showSaveDialog({
+			filters: { 'Template Package': ['zip'] },
+			saveLabel: 'Exportar',
+			defaultUri: vscode.Uri.file(path.join(this.context.globalStorageUri.fsPath, `${this.editorTemplate.manifest.id}.zip`))
+		});
+		if (!target) {
+			return;
+		}
+		try {
+			await createTemplateZip(this.editorTemplate, target.fsPath);
+			this.output.appendLine(`[${new Date().toISOString()}] Exportado: ${target.fsPath}`);
+		} catch (err: any) {
+			this.output.appendLine(`[${new Date().toISOString()}] Falha ao exportar: ${err?.message ?? err}`);
+		}
+	}
+
+	private async importEditorTemplateZip() {
+		const selection = await vscode.window.showOpenDialog({
+			canSelectMany: false,
+			canSelectFiles: true,
+			canSelectFolders: false,
+			filters: { 'Template Package': ['zip'] },
+			openLabel: 'Importar'
+		});
+		if (!selection?.length) {
+			return;
+		}
+		const zipPath = selection[0].fsPath;
+		const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'co-template-zip-'));
+		try {
+			await extractZipToDir(zipPath, tempRoot);
+			const templateRoot = await findTemplateRoot(tempRoot);
+			if (!templateRoot) {
+				this.templateError = 'Zip invalido: template.json ou main.tex ausente.';
+				this.viewProvider?.sendState(this.getState());
+				return;
+			}
+			const manifestPath = path.join(templateRoot, 'template.json');
+			const mainTexPath = path.join(templateRoot, 'main.tex');
+			const manifestRaw = await fs.readFile(manifestPath, 'utf8');
+			const manifest = JSON.parse(manifestRaw) as TemplateManifest;
+			const validation = validateTemplate(manifest, { dirName: manifest.id });
+			if (!validation.ok) {
+				this.templateError = validation.errors.join(' ');
+				this.viewProvider?.sendState(this.getState());
+				return;
+			}
+			if (!await fileExists(mainTexPath)) {
+				this.templateError = 'main.tex ausente no zip.';
+				this.viewProvider?.sendState(this.getState());
+				return;
+			}
+			const targetDir = path.join(this.templateStorage.primaryDir, manifest.id);
+			if (await fileExists(targetDir)) {
+				const confirmation = await vscode.window.showWarningMessage(
+					`Template "${manifest.id}" ja existe. Substituir?`,
+					{ modal: true },
+					'Substituir',
+					'Cancelar'
+				);
+				if (confirmation !== 'Substituir') {
+					return;
+				}
+				await fs.rm(targetDir, { recursive: true, force: true });
+			}
+			await fs.mkdir(targetDir, { recursive: true });
+			await fs.copyFile(manifestPath, path.join(targetDir, 'template.json'));
+			await fs.copyFile(mainTexPath, path.join(targetDir, 'main.tex'));
+			const previewPath = path.join(templateRoot, 'preview_data.json');
+			if (await fileExists(previewPath)) {
+				await fs.copyFile(previewPath, path.join(targetDir, 'preview_data.json'));
+			}
+			const assetsSource = path.join(templateRoot, 'assets');
+			if (await fileExists(assetsSource)) {
+				await copyDirectory(assetsSource, path.join(targetDir, 'assets'));
+			}
+			this.output.appendLine(`[${new Date().toISOString()}] Template importado: ${manifest.id}`);
+			await this.refreshTemplates();
+			await this.selectEditorTemplate(manifest.id);
+		} catch (err: any) {
+			this.templateError = `Falha ao importar: ${err?.message ?? err}`;
+			this.viewProvider?.sendState(this.getState());
+		} finally {
+			await fs.rm(tempRoot, { recursive: true, force: true });
+		}
+	}
+
+	private async saveEditorTemplateDraft(message: any) {
+		if (!message || typeof message !== 'object') {
+			return;
+		}
+		const manifestText = typeof message.manifestText === 'string' ? message.manifestText : '';
+		const mainTex = typeof message.mainTex === 'string' ? message.mainTex : '';
+		const previewText = typeof message.previewText === 'string' ? message.previewText : '';
+		const previousId = typeof message.previousId === 'string' ? message.previousId.trim() : undefined;
+
+		let manifest: TemplateManifest;
+		try {
+			manifest = JSON.parse(manifestText) as TemplateManifest;
+		} catch {
+			this.templateError = 'template.json invalido.';
+			this.viewProvider?.sendState(this.getState());
+			return;
+		}
+		const validation = validateTemplate(manifest, { dirName: manifest.id });
+		if (!validation.ok) {
+			this.templateError = validation.errors.join(' ');
+			this.viewProvider?.sendState(this.getState());
+			return;
+		}
+		let previewData: Record<string, any> = {};
+		if (previewText.trim()) {
+			try {
+				const parsed = JSON.parse(previewText) as Record<string, any>;
+				previewData = isPlainObject(parsed) ? parsed : {};
+			} catch {
+				this.templateError = 'preview_data.json invalido.';
+				this.viewProvider?.sendState(this.getState());
+				return;
+			}
+		}
+
+		const targetId = manifest.id.trim();
+		if (!targetId) {
+			this.templateError = 'ID do template invalido.';
+			this.viewProvider?.sendState(this.getState());
+			return;
+		}
+		if (previousId && previousId !== targetId && await this.templateExists(targetId)) {
+			this.templateError = 'Ja existe um template com esse ID.';
+			this.viewProvider?.sendState(this.getState());
+			return;
+		}
+
+		const current = this.editorTemplate;
+		if (current?.readOnly && (!previousId || previousId === current.manifest.id)) {
+			this.templateError = 'Template somente leitura. Duplique para editar.';
+			this.viewProvider?.sendState(this.getState());
+			return;
+		}
+		if (previousId && previousId !== targetId && current && !current.readOnly) {
+			const oldDir = path.join(this.templateStorage.primaryDir, previousId);
+			const newDir = path.join(this.templateStorage.primaryDir, targetId);
+			if (await fileExists(oldDir) && !await fileExists(newDir)) {
+				await fs.rename(oldDir, newDir);
+			}
+		}
+
+		try {
+			const saved = await saveTemplate(this.templateStorage, {
+				manifest,
+				mainTex,
+				previewData
+			});
+			if (current && current.readOnly) {
+				await copyAssets(current.assetsDir, saved.assetsDir);
+			}
+			this.editorTemplate = saved;
+			this.editorRevision += 1;
+			this.templateError = undefined;
+			await this.refreshEditorAssets();
+			await this.refreshTemplates();
+			await this.scheduleTemplateBuild();
+		} catch (err: any) {
+			this.templateError = `Falha ao salvar: ${err?.message ?? err}`;
+			this.viewProvider?.sendState(this.getState());
+		}
+	}
+
+	private async addEditorAsset(name: any, contents: any) {
+		const current = this.editorTemplate;
+		if (!current || current.readOnly) {
+			return;
+		}
+		const safePath = normalizeAssetPath(name);
+		if (!safePath || typeof contents !== 'string') {
+			return;
+		}
+		const target = path.join(current.assetsDir, ...safePath.split('/'));
+		await fs.mkdir(path.dirname(target), { recursive: true });
+		const buffer = Buffer.from(contents, 'base64');
+		await fs.writeFile(target, buffer);
+		await this.refreshEditorAssets();
+		this.viewProvider?.sendState(this.getState());
+		await this.scheduleTemplateBuild();
+	}
+
+	private async deleteEditorAsset(name: any) {
+		const current = this.editorTemplate;
+		if (!current || current.readOnly) {
+			return;
+		}
+		const safePath = normalizeAssetPath(name);
+		if (!safePath) {
+			return;
+		}
+		const target = path.join(current.assetsDir, ...safePath.split('/'));
+		await fs.unlink(target).catch(() => undefined);
+		await this.refreshEditorAssets();
+		this.viewProvider?.sendState(this.getState());
+		await this.scheduleTemplateBuild();
+	}
+
+	private async scheduleTemplateBuild() {
+		if (!this.editorTemplate) {
+			return;
+		}
+		const refreshed = await loadTemplate(this.templateStorage, this.editorTemplate.manifest.id);
+		if (refreshed) {
+			this.editorTemplate = refreshed;
+		}
+		const fastBuild = this.getFastBuildSetting();
+		const outDir = path.join(this.paths.templatePreviewDir, this.editorTemplate.manifest.id);
+		this.templateBuildService.schedule({
+			template: this.editorTemplate,
+			previewData: this.editorTemplate.previewData ?? {},
+			outDir,
+			fast: fastBuild
+		});
+	}
+
+	private async openTemplatePreview() {
+		if (!this.editorTemplate) {
+			return;
+		}
+		const previewPath = path.join(this.paths.templatePreviewDir, this.editorTemplate.manifest.id, PREVIEW_PDF_NAME);
+		await this.templatePreviewManager.open(previewPath);
+	}
+
+	private async refreshEditorAssets() {
+		if (!this.editorTemplate) {
+			this.editorAssets = [];
+			return;
+		}
+		this.editorAssets = await listAssetEntries(this.editorTemplate.assetsDir);
+	}
+
+	private async templateExists(id: string): Promise<boolean> {
+		if (!id) {
+			return false;
+		}
+		const primary = path.join(this.templateStorage.primaryDir, id, 'template.json');
+		if (await fileExists(primary)) {
+			return true;
+		}
+		if (this.templateStorage.fallbackDir) {
+			const fallback = path.join(this.templateStorage.fallbackDir, id, 'template.json');
+			return fileExists(fallback);
+		}
+		return false;
+	}
+
+	private async getUniqueTemplateId(base: string): Promise<string> {
+		const cleanBase = slugify(base) || 'template';
+		let candidate = cleanBase;
+		let counter = 1;
+		while (await this.templateExists(candidate)) {
+			candidate = `${cleanBase}-${counter}`;
+			counter += 1;
+		}
+		return candidate;
 	}
 
 	private async refreshTemplates(): Promise<boolean> {
@@ -258,11 +812,181 @@ class DiagramadorController implements vscode.Disposable {
 		}
 		const changed = current !== this.project.templateId;
 		this.templateCache.clear();
-		this.viewProvider?.sendTemplates(this.templates);
-		if (changed) {
-			this.viewProvider?.sendProject(this.project);
+		await this.ensureTemplateReady(this.project.templateId);
+		if (this.editorTemplate && !this.templates.some(template => template.id === this.editorTemplate?.manifest.id)) {
+			this.editorTemplate = undefined;
+			this.editorAssets = [];
 		}
+		if (!this.editorTemplate && this.templates.length) {
+			const fallbackId = this.templates.some(template => template.id === this.project.templateId)
+				? this.project.templateId
+				: this.templates[0].id;
+			await this.selectEditorTemplate(fallbackId, { silent: true, skipBuild: true });
+		}
+		this.viewProvider?.sendState(this.getState());
 		return changed;
+	}
+
+	private async refreshTasks() {
+		this.tasks = await listDiagramadorTasks(this.storage, this.paths);
+		if (this.currentTaskId && !this.tasks.some(task => task.id === this.currentTaskId)) {
+			this.currentTaskId = undefined;
+			this.project = createDefaultProject();
+			this.viewProvider?.sendState(this.getState());
+		}
+		this.viewProvider?.sendState(this.getState());
+	}
+
+	private async openTask(taskId: string | undefined) {
+		const normalized = normalizeTaskId(taskId);
+		if (!normalized) {
+			return;
+		}
+		const project = await loadDiagramadorTask(this.storage, normalized);
+		if (!project) {
+			return;
+		}
+		this.project = project;
+		this.currentTaskId = normalized;
+		this.buildError = undefined;
+		this.buildLogPath = undefined;
+		const selectionChanged = await this.refreshTemplates();
+		this.viewProvider?.sendState(this.getState());
+		if (selectionChanged) {
+			await this.saveAndBuild();
+			return;
+		}
+		await this.refreshTasks();
+		await this.scheduleBuild();
+	}
+
+	private async createTask(templateId?: string) {
+		const selectedTemplateId = await this.pickTemplateForNewTask(templateId);
+		if (!selectedTemplateId) {
+			return;
+		}
+		const taskId = await createUniqueTaskId(this.storage);
+		this.project = createDefaultProject();
+		this.project.templateId = selectedTemplateId;
+		this.currentTaskId = taskId;
+		this.buildError = undefined;
+		this.buildLogPath = undefined;
+		const template = await this.ensureTemplateReady(selectedTemplateId);
+		this.viewProvider?.sendState(this.getState());
+		await this.saveAndBuild(template);
+	}
+
+	private async pickTemplateForNewTask(preferredId?: string): Promise<string | undefined> {
+		await this.refreshTemplates();
+		if (!this.templates.length) {
+			return this.project.templateId || DEFAULT_TEMPLATE_ID;
+		}
+		if (this.templates.length === 1) {
+			return this.templates[0].id;
+		}
+		type TemplatePickItem = vscode.QuickPickItem & { id: string };
+		const normalizedPreferred = typeof preferredId === 'string' ? preferredId.trim() : '';
+		const fallbackId = this.templates.some(template => template.id === normalizedPreferred)
+			? normalizedPreferred
+			: this.templates.some(template => template.id === this.project.templateId)
+				? this.project.templateId
+				: undefined;
+		const items: TemplatePickItem[] = this.templates.map((template) => ({
+			id: template.id,
+			label: template.name || template.id,
+			description: template.version ? `v${template.version}` : '',
+			detail: template.description ? `${template.id} - ${template.description}` : template.id,
+			picked: template.id === fallbackId
+		}));
+		const picked = await vscode.window.showQuickPick(items, {
+			title: 'Escolha o template da tarefa',
+			placeHolder: 'Selecione um template',
+			matchOnDescription: true,
+			matchOnDetail: true
+		});
+		return picked?.id;
+	}
+
+	private async renameTask(taskId: any, label: any) {
+		const normalized = normalizeTaskId(taskId);
+		if (!normalized) {
+			return;
+		}
+		const currentLabel = typeof label === 'string' ? label : '';
+		const input = await vscode.window.showInputBox({
+			prompt: 'Nome da tarefa',
+			value: currentLabel,
+			placeHolder: 'Ex: Tarefa 01'
+		});
+		if (input === undefined) {
+			return;
+		}
+		const trimmed = input.trim();
+		const project = await loadDiagramadorTask(this.storage, normalized);
+		if (!project) {
+			return;
+		}
+		const data = isPlainObject(project.data) ? project.data : {};
+		const nextData = { ...data };
+		if (trimmed) {
+			nextData.TaskLabel = trimmed;
+		} else {
+			delete nextData.TaskLabel;
+		}
+		project.data = nextData;
+		await saveDiagramadorTask(this.storage, normalized, project);
+		if (this.currentTaskId === normalized) {
+			this.project = project;
+			this.viewProvider?.sendState(this.getState());
+			await this.scheduleBuild();
+		}
+		await this.refreshTasks();
+	}
+
+	private async deleteTask(taskId: any) {
+		const normalized = normalizeTaskId(taskId);
+		if (!normalized) {
+			return;
+		}
+		const taskLabel = this.tasks.find(task => task.id === normalized)?.label ?? normalized;
+		const confirmation = await vscode.window.showWarningMessage(
+			this.currentTaskId === normalized
+				? `Excluir a tarefa atual (${taskLabel})?`
+				: `Excluir a tarefa "${taskLabel}"?`,
+			{ modal: true },
+			'Excluir',
+			'Cancelar'
+		);
+		if (confirmation !== 'Excluir') {
+			return;
+		}
+		const target = path.join(this.paths.tasksDir, `${normalized}.json`);
+		await fs.rm(target, { force: true });
+		if (this.currentTaskId === normalized) {
+			const previousTemplateId = this.project.templateId;
+			this.currentTaskId = undefined;
+			this.project = createDefaultProject();
+			this.project.templateId = previousTemplateId || this.project.templateId;
+			this.status = { state: 'idle' };
+			this.buildError = undefined;
+			this.buildLogPath = undefined;
+			await this.refreshTemplates();
+			this.viewProvider?.sendState(this.getState());
+		}
+		await this.refreshTasks();
+	}
+
+	private async migrateLegacyProject() {
+		const hasTasks = await hasDiagramadorTasks(this.storage);
+		if (hasTasks) {
+			return;
+		}
+		const legacyProject = await readProjectFromStorage(this.storage, PROJECT_FILE_NAME);
+		if (!legacyProject) {
+			return;
+		}
+		const taskId = await createUniqueTaskId(this.storage);
+		await saveDiagramadorTask(this.storage, taskId, legacyProject);
 	}
 
 	private async ensureDefaultTemplate() {
@@ -283,8 +1007,9 @@ class DiagramadorController implements vscode.Disposable {
 			NextDate: '00/04/2020',
 			NextTime: 'As 00h00min',
 			NextLocal: 'Q.G. da C.O.',
-			TaskBodyHeight: '6cm',
-			TaskBody: ''
+			TaskBody: '',
+			Sponsors: '',
+			Food: ''
 		};
 		const manifest: TemplateManifest = {
 			id: DEFAULT_TEMPLATE_ID,
@@ -303,8 +1028,9 @@ class DiagramadorController implements vscode.Disposable {
 				{ key: 'NextDate', type: 'string', label: 'Proxima tarefa (data)' },
 				{ key: 'NextTime', type: 'string', label: 'Proxima tarefa (hora)' },
 				{ key: 'NextLocal', type: 'string', label: 'Proxima tarefa (local)' },
-				{ key: 'TaskBodyHeight', type: 'string', label: 'Altura do corpo' },
-				{ key: 'TaskBody', type: 'string', label: 'Texto da tarefa' }
+				{ key: 'TaskBody', type: 'latex', label: 'Texto da tarefa' },
+				{ key: 'Sponsors', type: 'latex', label: 'Patrocinadores' },
+				{ key: 'Food', type: 'latex', label: 'Alimento' }
 			],
 			defaults
 		};
@@ -344,36 +1070,13 @@ class DiagramadorController implements vscode.Disposable {
 			return;
 		}
 		const configured = vscode.workspace.getConfiguration('co').get<string>('tectonic.bundlePath');
-		const envBundle = process.env.CO_TECTONIC_BUNDLE || process.env.TECTONIC_BUNDLE;
-		const storageBundle = path.join(this.context.globalStorageUri.fsPath, 'tectonic.bundle');
-		const fromEnv = await pickExistingPath(envBundle);
-		if (fromEnv) {
-			process.env.CO_TECTONIC_BUNDLE = fromEnv;
-			this.bundlePath = fromEnv;
-			return;
-		}
-		const fromConfig = await pickExistingPath(configured);
-		if (fromConfig) {
-			process.env.CO_TECTONIC_BUNDLE = fromConfig;
-			this.bundlePath = fromConfig;
-			return;
-		}
-		if (await fileExists(storageBundle)) {
-			process.env.CO_TECTONIC_BUNDLE = storageBundle;
-			this.bundlePath = storageBundle;
-			return;
-		}
-		const cached = await findBundleInCache();
-		if (cached) {
-			await fs.mkdir(this.context.globalStorageUri.fsPath, { recursive: true });
-			try {
-				await fs.copyFile(cached, storageBundle);
-				process.env.CO_TECTONIC_BUNDLE = storageBundle;
-				this.bundlePath = storageBundle;
-			} catch {
-				process.env.CO_TECTONIC_BUNDLE = cached;
-				this.bundlePath = cached;
-			}
+		const resolved = await resolveTectonicBundlePath({
+			configuredPath: configured,
+			globalStoragePath: this.context.globalStorageUri.fsPath
+		});
+		if (resolved) {
+			process.env.CO_TECTONIC_BUNDLE = resolved;
+			this.bundlePath = resolved;
 		}
 	}
 
@@ -411,10 +1114,25 @@ class DiagramadorController implements vscode.Disposable {
 		return template;
 	}
 
+	private async ensureTemplateReady(templateId: string): Promise<TemplatePackage | undefined> {
+		const template = await this.getTemplatePackage(templateId);
+		this.currentSchema = template?.manifest.schema ?? [];
+		if (template) {
+			const changed = applySchemaDefaults(this.project, template);
+			if (changed) {
+				this.viewProvider?.sendState(this.getState());
+			}
+		}
+		return template;
+	}
+
 	private handleBuildResult(result: TemplateBuildResult) {
+		this.buildLogPath = result.logPath;
 		if (result.ok) {
+			this.buildError = undefined;
 			return;
 		}
+		this.buildError = result.friendly || 'Falha ao gerar o PDF.';
 		this.output.appendLine(`[${new Date().toISOString()}] ${result.friendly}`);
 		if (result.stdout) {
 			this.output.appendLine(result.stdout);
@@ -422,786 +1140,540 @@ class DiagramadorController implements vscode.Disposable {
 		if (result.stderr) {
 			this.output.appendLine(result.stderr);
 		}
+		this.viewProvider?.sendState(this.getState());
 	}
 
 	private handleStatus(status: DiagramadorStatus) {
-		this.viewProvider?.sendStatus(status);
-		if (status.state === 'success') {
+		this.status = status;
+		if (status.state === 'building') {
+			this.buildError = undefined;
+		}
+		this.viewProvider?.sendState(this.getState());
+		if (status.state === 'success' && this.activeTab === 'document') {
 			void this.previewManager.refresh(this.paths.previewPdfPath);
+		}
+	}
+
+	private handleTemplateBuildResult(result: TemplateBuildResult) {
+		this.templateBuildLogPath = result.logPath;
+		if (result.ok) {
+			this.templateBuildError = undefined;
+			return;
+		}
+		this.templateBuildError = result.friendly || 'Falha ao gerar o PDF.';
+		this.output.appendLine(`[${new Date().toISOString()}] ${result.friendly}`);
+		if (result.stdout) {
+			this.output.appendLine(result.stdout);
+		}
+		if (result.stderr) {
+			this.output.appendLine(result.stderr);
+		}
+		this.viewProvider?.sendState(this.getState());
+	}
+
+	private handleTemplateStatus(status: DiagramadorStatus) {
+		this.templateStatus = status;
+		if (status.state === 'building') {
+			this.templateBuildError = undefined;
+		}
+		this.viewProvider?.sendState(this.getState());
+		if (status.state === 'success' && this.activeTab === 'templates') {
+			void this.openTemplatePreview();
 		}
 	}
 
 	dispose() {
 		this.buildService.dispose();
+		this.templateBuildService.dispose();
 		this.previewManager.dispose();
+		this.templatePreviewManager.dispose();
 		this.output.dispose();
 	}
 }
 
-class DiagramadorPreviewManager implements vscode.Disposable {
-	private lastViewPath?: string;
-	private lastImagePath?: string;
-	private panel?: vscode.WebviewPanel;
-	private readonly pdfjsRoot?: string;
-	private readonly previewMode: 'auto' | 'pdfjs' | 'system' | 'image';
-	private readonly preferPdfJs: boolean;
-	private previewListenerAttached = false;
-
-	constructor(private readonly output: vscode.OutputChannel, extensionRoot: string, appName: string) {
-		const candidate = path.resolve(extensionRoot, '..', 'latex-workshop', 'node_modules', 'pdfjs-dist');
-		this.pdfjsRoot = candidate;
-		this.previewMode = this.resolvePreviewMode(appName);
-		this.preferPdfJs = this.previewMode === 'pdfjs' || (this.previewMode === 'auto' && this.shouldPreferPdfJs(appName));
-		this.output.appendLine(`[${new Date().toISOString()}] Diagramador preview mode: ${this.previewMode}${this.preferPdfJs ? ' (prefer pdfjs)' : ''}`);
+function resolveDiagramadorBaseDir(context: vscode.ExtensionContext): string {
+	const override = (process.env.CO_SAVE_DIR ?? '').trim();
+	if (override) {
+		return override;
 	}
-
-	async open(previewPdfPath: string) {
-		if (!await fileExists(previewPdfPath)) {
-			return;
-		}
-		const viewPath = await this.copyForView(previewPdfPath);
-		await this.showPreview(viewPath);
-		await this.cleanupOldCopies(path.dirname(previewPdfPath), [viewPath, this.lastImagePath]);
+	const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+	if (workspaceFolder) {
+		return path.join(workspaceFolder.uri.fsPath, '.co', 'diagramador');
 	}
-
-	async refresh(previewPdfPath: string) {
-		await this.open(previewPdfPath);
-	}
-
-	private async copyForView(previewPdfPath: string): Promise<string> {
-		const dir = path.dirname(previewPdfPath);
-		const viewName = `preview_view_${Date.now()}_${Math.random().toString(36).slice(2, 8)}.pdf`;
-		const viewPath = path.join(dir, viewName);
-		await fs.copyFile(previewPdfPath, viewPath);
-		this.lastViewPath = viewPath;
-		return viewPath;
-	}
-
-	private async showPreview(viewPath: string) {
-		const viewColumn = this.pickPreviewColumn();
-		const uri = vscode.Uri.file(viewPath);
-		if (this.preferPdfJs && await this.showPreviewWebviewPdfJs(viewPath, viewColumn)) {
-			this.output.appendLine(`[${new Date().toISOString()}] Preview: pdfjs webview`);
-			return;
-		}
-		if (this.previewMode !== 'image') {
-			const customViewer = await this.findPdfCustomEditorViewType();
-			if (customViewer) {
-				try {
-					await vscode.commands.executeCommand('vscode.openWith', uri, customViewer, {
-						viewColumn,
-						preview: true
-					});
-					this.panel?.dispose();
-					this.panel = undefined;
-					this.output.appendLine(`[${new Date().toISOString()}] Preview: custom editor (${customViewer})`);
-					return;
-				} catch (err: any) {
-					this.output.appendLine(`[${new Date().toISOString()}] Falha ao abrir viewer PDF (${customViewer}): ${err?.message ?? err}`);
-				}
-			}
-			const hasPdfViewer = Boolean(vscode.extensions.getExtension('vscode.pdf') || vscode.extensions.getExtension('ms-vscode.pdf'));
-			if (hasPdfViewer) {
-				try {
-					await vscode.commands.executeCommand('vscode.open', uri, {
-						viewColumn,
-						preview: true
-					});
-					this.panel?.dispose();
-					this.panel = undefined;
-					this.output.appendLine(`[${new Date().toISOString()}] Preview: vscode.open (builtin)`);
-					return;
-				} catch (err: any) {
-					this.output.appendLine(`[${new Date().toISOString()}] Falha ao abrir preview: ${err?.message ?? err}`);
-				}
-			}
-		}
-		if (!this.preferPdfJs && await this.showPreviewWebviewPdfJs(viewPath, viewColumn)) {
-			this.output.appendLine(`[${new Date().toISOString()}] Preview: pdfjs webview (fallback)`);
-			return;
-		}
-		if (this.previewMode !== 'system') {
-			const imagePath = await this.renderPreviewImage(viewPath);
-			if (imagePath) {
-				this.lastImagePath = imagePath;
-				await this.showPreviewWebviewImage(imagePath, viewColumn);
-				this.output.appendLine(`[${new Date().toISOString()}] Preview: png fallback`);
-				return;
-			}
-		}
-		await this.showPreviewWebviewPdf(viewPath, viewColumn);
-		this.output.appendLine(`[${new Date().toISOString()}] Preview: iframe fallback`);
-	}
-
-	private async findPdfCustomEditorViewType(): Promise<string | undefined> {
-		for (const extension of vscode.extensions.all) {
-			const customEditors = extension.packageJSON?.contributes?.customEditors;
-			if (!Array.isArray(customEditors)) {
-				continue;
-			}
-			const main = extension.packageJSON?.main;
-			if (typeof main === 'string') {
-				const mainPath = path.join(extension.extensionPath, main);
-				if (!await fileExists(mainPath)) {
-					continue;
-				}
-			}
-			for (const editor of customEditors) {
-				const selector = editor?.selector;
-				const selectors = Array.isArray(selector) ? selector : selector ? [selector] : [];
-				for (const entry of selectors) {
-					const pattern = entry?.filenamePattern;
-					if (typeof pattern !== 'string') {
-						continue;
-					}
-					if (pattern.includes('.pdf') || pattern.includes('{pdf') || pattern.includes('pdf}')) {
-						if (typeof editor.viewType === 'string') {
-							return editor.viewType;
-						}
-					}
-				}
-			}
-		}
-		return undefined;
-	}
-
-	private async resolvePdfJsPaths(): Promise<PdfJsPaths | undefined> {
-		if (!this.pdfjsRoot) {
-			return undefined;
-		}
-		const root = this.pdfjsRoot;
-		const pdfJsPath = path.join(root, 'build', 'pdf.mjs');
-		const pdfWorkerPath = path.join(root, 'build', 'pdf.worker.mjs');
-		const viewerPath = path.join(root, 'web', 'pdf_viewer.mjs');
-		const viewerCssPath = path.join(root, 'web', 'pdf_viewer.css');
-		const cMapDir = path.join(root, 'cmaps');
-		const standardFontsDir = path.join(root, 'standard_fonts');
-		if (!await fileExists(pdfJsPath)) {
-			return undefined;
-		}
-		if (!await fileExists(pdfWorkerPath)) {
-			return undefined;
-		}
-		if (!await fileExists(viewerPath)) {
-			return undefined;
-		}
-		if (!await fileExists(viewerCssPath)) {
-			return undefined;
-		}
-		if (!await fileExists(cMapDir)) {
-			return undefined;
-		}
-		if (!await fileExists(standardFontsDir)) {
-			return undefined;
-		}
-		return {
-			root,
-			pdfJsPath,
-			pdfWorkerPath,
-			viewerPath,
-			viewerCssPath,
-			cMapDir,
-			standardFontsDir
-		};
-	}
-
-	private async showPreviewWebviewPdfJs(viewPath: string, viewColumn: vscode.ViewColumn): Promise<boolean> {
-		const paths = await this.resolvePdfJsPaths();
-		if (!paths) {
-			this.output.appendLine(`[${new Date().toISOString()}] PDF.js assets not found; skipping pdfjs preview.`);
-			return false;
-		}
-		let pdfBase64: string | undefined;
-		try {
-			const pdfData = await fs.readFile(viewPath);
-			pdfBase64 = pdfData.toString('base64');
-		} catch (err: any) {
-			this.output.appendLine(`[${new Date().toISOString()}] Falha ao ler PDF para preview: ${err?.message ?? err}`);
-			return false;
-		}
-		const dir = path.dirname(viewPath);
-		const panel = this.ensurePreviewPanel(viewColumn, [
-			vscode.Uri.file(dir),
-			vscode.Uri.file(paths.root)
-		]);
-		panel.webview.html = this.getPdfJsPreviewHtml(panel.webview, paths, pdfBase64);
-		return true;
-	}
-
-	private ensurePreviewPanel(viewColumn: vscode.ViewColumn, localResourceRoots: vscode.Uri[]) {
-		if (!this.panel) {
-			this.panel = vscode.window.createWebviewPanel(
-				'co.diagramador.preview',
-				'Diagramador Preview',
-				{ viewColumn, preserveFocus: true },
-				{
-					enableScripts: true,
-					localResourceRoots
-				}
-			);
-			this.panel.onDidDispose(() => {
-				this.panel = undefined;
-				this.previewListenerAttached = false;
-			});
-			if (!this.previewListenerAttached) {
-				this.previewListenerAttached = true;
-				this.panel.webview.onDidReceiveMessage(message => {
-					if (message?.type === 'previewError') {
-						this.output.appendLine(`[${new Date().toISOString()}] Preview error: ${message?.message ?? 'unknown'}`);
-						if (message?.stack) {
-							this.output.appendLine(message.stack);
-						}
-					}
-				});
-			}
-		} else {
-			this.panel.reveal(viewColumn, true);
-			this.panel.webview.options = {
-				enableScripts: true,
-				localResourceRoots
-			};
-		}
-		return this.panel;
-	}
-
-	private async renderPreviewImage(viewPath: string): Promise<string | undefined> {
-		const dir = path.dirname(viewPath);
-		const stamp = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-		const base = path.join(dir, `preview_view_${stamp}`);
-		const args = ['-f', '1', '-l', '1', '-png', viewPath, base];
-		const imagePath = `${base}-1.png`;
-		return new Promise(resolve => {
-			let stderr = '';
-			const child = spawn('pdftoppm', args, { cwd: dir });
-			child.stderr.on('data', (data: Buffer) => { stderr += data.toString(); });
-			child.on('error', () => resolve(undefined));
-			child.on('close', async (code: number | null) => {
-				if (code !== 0) {
-					if (stderr.trim()) {
-						this.output.appendLine(`[${new Date().toISOString()}] pdftoppm: ${stderr.trim()}`);
-					}
-					resolve(undefined);
-					return;
-				}
-				if (await fileExists(imagePath)) {
-					resolve(imagePath);
-					return;
-				}
-				resolve(undefined);
-			});
-		});
-	}
-
-	private async showPreviewWebviewPdf(viewPath: string, viewColumn: vscode.ViewColumn) {
-		const dir = path.dirname(viewPath);
-		const panel = this.ensurePreviewPanel(viewColumn, [vscode.Uri.file(dir)]);
-		panel.webview.html = this.getPdfPreviewHtml(panel.webview, viewPath);
-	}
-
-	private async showPreviewWebviewImage(imagePath: string, viewColumn: vscode.ViewColumn) {
-		const dir = path.dirname(imagePath);
-		const panel = this.ensurePreviewPanel(viewColumn, [vscode.Uri.file(dir)]);
-		panel.webview.html = this.getImagePreviewHtml(panel.webview, imagePath);
-	}
-
-	/* eslint-disable local/code-no-unexternalized-strings */
-	private getPdfJsPreviewHtml(webview: vscode.Webview, paths: PdfJsPaths, pdfBase64: string): string {
-		const nonce = getNonce();
-		const csp = [
-			"default-src 'none'",
-			`img-src ${webview.cspSource} data: blob:`,
-			`style-src ${webview.cspSource} 'unsafe-inline'`,
-			`script-src 'nonce-${nonce}' ${webview.cspSource}`,
-			`connect-src ${webview.cspSource}`,
-			`font-src ${webview.cspSource}`,
-			`worker-src ${webview.cspSource} blob:`
-		].join('; ');
-		const pdfJsUri = webview.asWebviewUri(vscode.Uri.file(paths.pdfJsPath));
-		const pdfWorkerUri = webview.asWebviewUri(vscode.Uri.file(paths.pdfWorkerPath));
-		const viewerUri = webview.asWebviewUri(vscode.Uri.file(paths.viewerPath));
-		const viewerCssUri = webview.asWebviewUri(vscode.Uri.file(paths.viewerCssPath));
-		const cMapUri = webview.asWebviewUri(vscode.Uri.file(paths.cMapDir));
-		const standardFontsUri = webview.asWebviewUri(vscode.Uri.file(paths.standardFontsDir));
-		const pdfPayload = JSON.stringify(pdfBase64);
-		return `<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8" />
-<meta http-equiv="Content-Security-Policy" content="${csp}" />
-<meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>Diagramador Preview</title>
-<link rel="stylesheet" href="${viewerCssUri}">
-<style>
-	:root { color-scheme: dark; }
-	body {
-		margin: 0;
-		background: #1e1e1e;
-		color: #d4d4d4;
-		font-family: "Segoe UI", Arial, sans-serif;
-		height: 100vh;
-		display: flex;
-		flex-direction: column;
-	}
-	.toolbar {
-		display: flex;
-		align-items: center;
-		gap: 8px;
-		padding: 8px 10px;
-		background: #252526;
-		border-bottom: 1px solid #333;
-	}
-	.toolbar .spacer { flex: 1; }
-	button {
-		background: #3c3c3c;
-		color: #fff;
-		border: 1px solid #4a4a4a;
-		border-radius: 4px;
-		padding: 4px 8px;
-		cursor: pointer;
-	}
-	button:disabled { opacity: 0.5; cursor: default; }
-	input[type="number"] {
-		width: 64px;
-		background: #1e1e1e;
-		color: #d4d4d4;
-		border: 1px solid #4a4a4a;
-		border-radius: 4px;
-		padding: 4px 6px;
-	}
-	.viewerRoot {
-		position: relative;
-		flex: 1 1 auto;
-	}
-	#viewerContainer {
-		position: absolute;
-		inset: 0;
-		overflow: auto;
-		background: #1e1e1e;
-	}
-	#viewer {
-		margin: 0 auto;
-	}
-	.status {
-		position: absolute;
-		top: 52px;
-		left: 12px;
-		font-size: 12px;
-		color: #9e9e9e;
-	}
-	.pdfViewer .page {
-		box-shadow: 0 2px 10px rgba(0, 0, 0, 0.4);
-		margin: 12px auto;
-	}
-</style>
-</head>
-<body>
-	<div class="toolbar">
-		<button id="prevPage" type="button">Prev</button>
-		<button id="nextPage" type="button">Next</button>
-		<span>Page</span>
-		<input id="pageNumber" type="number" min="1" value="1" />
-		<span id="pageCount">/ 1</span>
-		<span class="spacer"></span>
-		<button id="zoomOut" type="button">-</button>
-		<span id="zoomValue">100%</span>
-		<button id="zoomIn" type="button">+</button>
-		<button id="fitWidth" type="button">Fit width</button>
-	</div>
-	<div class="viewerRoot">
-		<div id="viewerContainer">
-			<div id="viewer" class="pdfViewer"></div>
-		</div>
-	</div>
-	<div id="status" class="status">Loading PDF...</div>
-<script nonce="${nonce}" type="module">
-	import * as pdfjsLib from '${pdfJsUri}';
-	import { EventBus, PDFLinkService, PDFViewer } from '${viewerUri}';
-	const vscode = acquireVsCodeApi();
-
-	const pdfBase64 = ${pdfPayload};
-	const workerSrc = '${pdfWorkerUri}';
-	const cMapUrl = '${cMapUri}/';
-	const standardFontDataUrl = '${standardFontsUri}/';
-
-	const statusEl = document.getElementById('status');
-	const zoomValue = document.getElementById('zoomValue');
-	const pageNumber = document.getElementById('pageNumber');
-	const pageCount = document.getElementById('pageCount');
-	const prevButton = document.getElementById('prevPage');
-	const nextButton = document.getElementById('nextPage');
-	const zoomInButton = document.getElementById('zoomIn');
-	const zoomOutButton = document.getElementById('zoomOut');
-	const fitWidthButton = document.getElementById('fitWidth');
-
-	let pdfViewer;
-
-	async function configureWorker() {
-		try {
-			const response = await fetch(workerSrc);
-			const blob = await response.blob();
-			const blobUrl = URL.createObjectURL(blob);
-			pdfjsLib.GlobalWorkerOptions.workerPort = new Worker(blobUrl, { type: 'module' });
-		} catch (err) {
-			pdfjsLib.GlobalWorkerOptions.workerSrc = workerSrc;
-		}
-	}
-
-	function updateZoomLabel(scale) {
-		if (!Number.isFinite(scale)) {
-			return;
-		}
-		zoomValue.textContent = Math.round(scale * 100) + '%';
-	}
-
-	function updateNav() {
-		if (!pdfViewer) {
-			return;
-		}
-		const total = pdfViewer.pagesCount || 1;
-		const current = pdfViewer.currentPageNumber || 1;
-		prevButton.disabled = current <= 1;
-		nextButton.disabled = current >= total;
-	}
-
-	function decodeBase64ToBytes(base64) {
-		const binary = atob(base64);
-		const bytes = new Uint8Array(binary.length);
-		for (let i = 0; i < binary.length; i += 1) {
-			bytes[i] = binary.charCodeAt(i);
-		}
-		return bytes;
-	}
-
-	async function loadPdf() {
-		try {
-			await configureWorker();
-			const eventBus = new EventBus();
-			const linkService = new PDFLinkService({ eventBus });
-			const container = document.getElementById('viewerContainer');
-			const viewer = document.getElementById('viewer');
-			pdfViewer = new PDFViewer({
-				container,
-				viewer,
-				eventBus,
-				linkService
-			});
-			linkService.setViewer(pdfViewer);
-
-			eventBus.on('pagesinit', () => {
-				pageCount.textContent = '/ ' + (pdfViewer.pagesCount || 1);
-				pageNumber.value = String(pdfViewer.currentPageNumber || 1);
-				pdfViewer.currentScaleValue = 'page-width';
-				updateZoomLabel(pdfViewer.currentScale);
-				updateNav();
-				statusEl.textContent = '';
-			});
-
-			eventBus.on('pagechanging', (evt) => {
-				pageNumber.value = String(evt.pageNumber || 1);
-				updateNav();
-			});
-
-			eventBus.on('scalechanging', (evt) => {
-				updateZoomLabel(evt.scale);
-			});
-
-			const pdfBytes = decodeBase64ToBytes(pdfBase64);
-			const loadingTask = pdfjsLib.getDocument({
-				data: pdfBytes,
-				cMapUrl,
-				cMapPacked: true,
-				standardFontDataUrl,
-				useWasm: false,
-				useWorkerFetch: false,
-				isEvalSupported: false,
-				disableStream: true,
-				disableRange: true,
-				disableAutoFetch: true,
-				disableWorker: true
-			});
-			const pdfDoc = await loadingTask.promise;
-			pdfViewer.setDocument(pdfDoc);
-			linkService.setDocument(pdfDoc);
-		} catch (err) {
-			const message = err && err.message ? err.message : String(err);
-			statusEl.textContent = 'Failed to load PDF: ' + message;
-			vscode.postMessage({
-				type: 'previewError',
-				message,
-				stack: err && err.stack ? err.stack : undefined
-			});
-			console.error(err);
-		}
-	}
-
-	prevButton.addEventListener('click', () => {
-		if (pdfViewer) {
-			pdfViewer.currentPageNumber = Math.max(1, (pdfViewer.currentPageNumber || 1) - 1);
-		}
-	});
-
-	nextButton.addEventListener('click', () => {
-		if (pdfViewer) {
-			const total = pdfViewer.pagesCount || 1;
-			pdfViewer.currentPageNumber = Math.min(total, (pdfViewer.currentPageNumber || 1) + 1);
-		}
-	});
-
-	pageNumber.addEventListener('change', () => {
-		if (!pdfViewer) {
-			return;
-		}
-		let value = Number.parseInt(pageNumber.value, 10);
-		if (!Number.isFinite(value)) {
-			value = pdfViewer.currentPageNumber || 1;
-		}
-		const total = pdfViewer.pagesCount || 1;
-		value = Math.min(Math.max(value, 1), total);
-		pdfViewer.currentPageNumber = value;
-	});
-
-	zoomInButton.addEventListener('click', () => {
-		if (pdfViewer) {
-			pdfViewer.currentScale = Math.min((pdfViewer.currentScale || 1) + 0.1, 4);
-		}
-	});
-
-	zoomOutButton.addEventListener('click', () => {
-		if (pdfViewer) {
-			pdfViewer.currentScale = Math.max((pdfViewer.currentScale || 1) - 0.1, 0.2);
-		}
-	});
-
-	fitWidthButton.addEventListener('click', () => {
-		if (pdfViewer) {
-			pdfViewer.currentScaleValue = 'page-width';
-			updateZoomLabel(pdfViewer.currentScale);
-		}
-	});
-
-	loadPdf();
-</script>
-</body>
-</html>`;
-	}
-
-	private resolvePreviewMode(appName: string): 'auto' | 'pdfjs' | 'system' | 'image' {
-		const envMode = (process.env.CO_DIAGRAMADOR_PREVIEW_MODE ?? '').trim().toLowerCase();
-		if (envMode === 'pdfjs') {
-			return 'pdfjs';
-		}
-		if (envMode === 'system' || envMode === 'custom') {
-			return 'system';
-		}
-		if (envMode === 'image') {
-			return 'image';
-		}
-		if (envMode === 'auto') {
-			return 'auto';
-		}
-		const lower = appName.toLowerCase();
-		if (lower.includes('dev') || lower.includes('oss')) {
-			return 'pdfjs';
-		}
-		return 'auto';
-	}
-
-	private shouldPreferPdfJs(appName: string): boolean {
-		const lower = appName.toLowerCase();
-		return lower.includes('dev') || lower.includes('oss');
-	}
-
-	private getPdfPreviewHtml(webview: vscode.Webview, viewPath: string): string {
-		const csp = [
-			"default-src 'none'",
-			`frame-src ${webview.cspSource} blob:`,
-			`style-src ${webview.cspSource} 'unsafe-inline'`
-		].join('; ');
-		const pdfUri = webview.asWebviewUri(vscode.Uri.file(viewPath));
-		const cacheBust = Date.now();
-		return `<!DOCTYPE html>
-<html lang="pt-br">
-<head>
-<meta charset="UTF-8" />
-<meta http-equiv="Content-Security-Policy" content="${csp}" />
-<meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>Diagramador Preview</title>
-<style>
-	body, html { margin: 0; padding: 0; height: 100%; background: #1e1e1e; }
-	iframe { width: 100%; height: 100%; border: 0; background: #1e1e1e; }
-</style>
-</head>
-<body>
-<iframe src="${pdfUri}?v=${cacheBust}#toolbar=0&navpanes=0"></iframe>
-</body>
-</html>`;
-	}
-
-	private getImagePreviewHtml(webview: vscode.Webview, imagePath: string): string {
-		const csp = [
-			"default-src 'none'",
-			`img-src ${webview.cspSource}`,
-			`style-src ${webview.cspSource} 'unsafe-inline'`
-		].join('; ');
-		const imageUri = webview.asWebviewUri(vscode.Uri.file(imagePath));
-		const cacheBust = Date.now();
-		return `<!DOCTYPE html>
-<html lang="pt-br">
-<head>
-<meta charset="UTF-8" />
-<meta http-equiv="Content-Security-Policy" content="${csp}" />
-<meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>Diagramador Preview</title>
-<style>
-	body, html { margin: 0; padding: 0; height: 100%; background: #1e1e1e; }
-	.preview {
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		height: 100%;
-		background: #1e1e1e;
-	}
-	img { max-width: 100%; max-height: 100%; object-fit: contain; }
-</style>
-</head>
-<body>
-<div class="preview">
-	<img src="${imageUri}?v=${cacheBust}" alt="Preview PDF" />
-</div>
-	</body>
-	</html>`;
-	}
-	/* eslint-enable local/code-no-unexternalized-strings */
-
-	private pickPreviewColumn(): vscode.ViewColumn {
-		const hasOpenTabs = vscode.window.tabGroups.all.some(group => group.tabs.length > 0);
-		if (!hasOpenTabs) {
-			return vscode.ViewColumn.One;
-		}
-		return vscode.ViewColumn.Beside;
-	}
-
-	private async cleanupOldCopies(dir: string, keepPaths: Array<string | undefined>) {
-		try {
-			const keep = new Set(keepPaths.filter(Boolean) as string[]);
-			const entries = await fs.readdir(dir);
-			const targets = entries.filter(entry => entry.startsWith('preview_view_'));
-			await Promise.all(targets.map(async entry => {
-				const full = path.join(dir, entry);
-				if (!keep.has(full)) {
-					await fs.unlink(full).catch(() => undefined);
-				}
-			}));
-		} catch {
-			// best effort
-		}
-	}
-
-	dispose() {
-		this.panel?.dispose();
-		if (this.lastViewPath) {
-			void fs.unlink(this.lastViewPath).catch(() => undefined);
-		}
-		if (this.lastImagePath) {
-			void fs.unlink(this.lastImagePath).catch(() => undefined);
-		}
-	}
+	return path.join(context.globalStorageUri.fsPath, 'diagramador');
 }
 
-function resolveDiagramadorPaths(): DiagramadorPaths {
-	const baseDir = (process.env.CO_SAVE_DIR && process.env.CO_SAVE_DIR.trim())
-		? process.env.CO_SAVE_DIR.trim()
-		: path.join(os.homedir(), 'teste_salvo');
+function resolveDiagramadorPaths(baseDir: string): DiagramadorPaths {
 	return {
 		baseDir,
-		projectPath: path.join(baseDir, 'project.json'),
-		outDir: path.join(baseDir, 'out'),
-		previewTexPath: path.join(baseDir, 'out', 'preview.tex'),
-		previewPdfPath: path.join(baseDir, 'out', 'preview.pdf'),
-		buildLogPath: path.join(baseDir, 'out', 'build.log')
+		projectPath: path.join(baseDir, PROJECT_FILE_NAME),
+		tasksDir: path.join(baseDir, TASKS_DIR_NAME),
+		outDir: path.join(baseDir, OUT_DIR_NAME),
+		templatePreviewDir: path.join(baseDir, TEMPLATE_PREVIEW_DIR_NAME),
+		previewTexPath: path.join(baseDir, OUT_DIR_NAME, PREVIEW_TEX_NAME),
+		previewPdfPath: path.join(baseDir, OUT_DIR_NAME, PREVIEW_PDF_NAME),
+		buildLogPath: path.join(baseDir, OUT_DIR_NAME, BUILD_LOG_NAME)
 	};
 }
 
-async function ensureDiagramadorDirs(paths: DiagramadorPaths) {
-	await fs.mkdir(paths.baseDir, { recursive: true });
-	await fs.mkdir(paths.outDir, { recursive: true });
+async function ensureDiagramadorDirs(storage: LocalStorageProvider) {
+	await storage.ensureDir('');
+	await storage.ensureDir(TASKS_DIR_NAME);
+	await storage.ensureDir(OUT_DIR_NAME);
+	await storage.ensureDir(TEMPLATE_PREVIEW_DIR_NAME);
 }
 
-async function loadDiagramadorProject(paths: DiagramadorPaths): Promise<DiagramadorProject> {
+async function readProjectFromStorage(storage: LocalStorageProvider, relativePath: string): Promise<DiagramadorProject | null> {
+	const raw = await storage.readFile(relativePath);
+	if (!raw) {
+		return null;
+	}
+	const parsed = parseProjectPayload(raw);
+	if (!parsed.project) {
+		return null;
+	}
+	if (parsed.migrated) {
+		await storage.writeFileAtomic(relativePath, serializeProject(parsed.project));
+	}
+	return parsed.project;
+}
+
+async function saveProjectToStorage(storage: LocalStorageProvider, relativePath: string, project: DiagramadorProject) {
+	const content = serializeProject(project);
+	await storage.writeFileAtomic(relativePath, content);
+}
+
+function getTaskRelativePath(taskId: string): string {
+	return path.join(TASKS_DIR_NAME, `${taskId}.json`);
+}
+
+async function loadDiagramadorTask(storage: LocalStorageProvider, taskId: string): Promise<DiagramadorProject | null> {
+	const relativePath = getTaskRelativePath(taskId);
+	return readProjectFromStorage(storage, relativePath);
+}
+
+async function saveDiagramadorTask(storage: LocalStorageProvider, taskId: string, project: DiagramadorProject) {
+	const relativePath = getTaskRelativePath(taskId);
+	await saveProjectToStorage(storage, relativePath, project);
+}
+
+async function listDiagramadorTasks(storage: LocalStorageProvider, paths: DiagramadorPaths): Promise<DiagramadorTaskSummary[]> {
 	try {
-		const raw = await fs.readFile(paths.projectPath, 'utf8');
-		const parsed = parseProject(raw);
-		if (parsed) {
-			return parsed;
+		const entries = storage.listFiles ? await storage.listFiles(TASKS_DIR_NAME) : [];
+		const tasks: DiagramadorTaskSummary[] = [];
+		for (const entry of entries) {
+			if (!entry.endsWith('.json')) {
+				continue;
+			}
+			const baseName = entry.slice(0, -'.json'.length);
+			const id = normalizeTaskId(baseName);
+			if (!id || id !== baseName) {
+				continue;
+			}
+			const fullPath = path.join(paths.tasksDir, entry);
+			let updatedAt = 0;
+			try {
+				const stats = await fs.stat(fullPath);
+				updatedAt = stats.mtimeMs;
+			} catch {
+				updatedAt = 0;
+			}
+			const project = await readProjectFromStorage(storage, path.join(TASKS_DIR_NAME, entry));
+			const label = getTaskLabel(project, id);
+			tasks.push({ id, label, updatedAt });
+		}
+		tasks.sort((a, b) => b.updatedAt - a.updatedAt);
+		return tasks;
+	} catch {
+		return [];
+	}
+}
+
+async function hasDiagramadorTasks(storage: LocalStorageProvider): Promise<boolean> {
+	try {
+		const entries = storage.listFiles ? await storage.listFiles(TASKS_DIR_NAME) : [];
+		return entries.some(entry => entry.endsWith('.json'));
+	} catch {
+		return false;
+	}
+}
+
+async function createUniqueTaskId(storage: LocalStorageProvider): Promise<string> {
+	let candidate = createTaskId();
+	let attempts = 0;
+	while (await storage.fileExists(getTaskRelativePath(candidate))) {
+		attempts += 1;
+		candidate = createTaskId();
+		if (attempts > 6) {
+			candidate = `${createTaskId()}_${Math.random().toString(36).slice(2, 6)}`;
+			break;
+		}
+	}
+	return candidate;
+}
+
+function createTaskId(): string {
+	return `tarefa_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function normalizeTaskId(value: string | null | undefined): string | undefined {
+	if (typeof value !== 'string') {
+		return undefined;
+	}
+	const trimmed = value.trim().replace(/\.json$/i, '');
+	if (!trimmed) {
+		return undefined;
+	}
+	const sanitized = trimmed.replace(/[^a-zA-Z0-9_-]/g, '');
+	return sanitized || undefined;
+}
+
+function getTaskLabel(project: DiagramadorProject | null, fallbackId: string): string {
+	const data = isPlainObject(project?.data) ? project?.data : {};
+	const customLabel = normalizeTaskLabel(pickDataValue(data, ['TaskLabel', 'taskLabel', 'label', 'Label']));
+	if (customLabel) {
+		return customLabel;
+	}
+	const taskNumber = normalizeTaskLabel(pickDataValue(data, ['TaskNumber', 'taskNumber']));
+	if (taskNumber && taskNumber.toUpperCase() !== 'XX') {
+		return `Tarefa ${taskNumber}`;
+	}
+	const title = normalizeTaskLabel(pickDataValue(data, ['title', 'Title']));
+	if (title) {
+		return title;
+	}
+	const model = normalizeTaskLabel(pickDataValue(data, ['model', 'Model']));
+	if (model) {
+		return model;
+	}
+	const shortId = fallbackId.slice(-6);
+	return shortId ? `Tarefa sem titulo (${shortId})` : 'Tarefa sem titulo';
+}
+
+function normalizeTaskLabel(value: string | null | undefined): string {
+	if (value === null || value === undefined) {
+		return '';
+	}
+	return String(value).trim();
+}
+
+function pickDataValue(data: Record<string, any>, keys: string[]): string | undefined {
+	for (const key of keys) {
+		if (Object.prototype.hasOwnProperty.call(data, key)) {
+			const value = data[key];
+			if (value !== null && value !== undefined) {
+				return String(value);
+			}
+		}
+	}
+	return undefined;
+}
+
+function parseProjectPayload(raw: string): { project: DiagramadorProject | null; migrated: boolean } {
+	const parsed = parseProject(raw);
+	if (parsed) {
+		return { project: parsed, migrated: false };
+	}
+	try {
+		const legacy = JSON.parse(raw) as Record<string, any>;
+		if (isPlainObject(legacy) && !Object.prototype.hasOwnProperty.call(legacy, 'schemaVersion')) {
+			return { project: migrateLegacyProject(legacy), migrated: true };
 		}
 	} catch {
 		// ignore
 	}
-	return createDefaultProject();
+	return { project: null, migrated: false };
 }
 
-async function saveDiagramadorProject(paths: DiagramadorPaths, project: DiagramadorProject) {
-	const content = serializeProject(project);
-	await atomicWrite(paths.projectPath, content);
+function isPlainObject(value: any): value is Record<string, any> {
+	return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }
 
-async function atomicWrite(filePath: string, content: string) {
-	const tmpPath = `${filePath}.${Date.now()}-${Math.random().toString(16).slice(2)}.tmp`;
-	await fs.writeFile(tmpPath, content, 'utf8');
-	try {
-		await fs.rename(tmpPath, filePath);
-	} catch {
-		await fs.unlink(filePath).catch(() => undefined);
-		await fs.rename(tmpPath, filePath);
-	}
-}
-
-async function pickExistingPath(value: string | undefined) {
-	if (!value || typeof value !== 'string') {
-		return undefined;
-	}
-	const trimmed = value.trim();
-	if (!trimmed) {
-		return undefined;
-	}
-	if (await fileExists(trimmed)) {
-		return trimmed;
-	}
-	return undefined;
-}
-
-async function findBundleInCache(): Promise<string | undefined> {
-	const cacheRoot = process.env.XDG_CACHE_HOME || path.join(os.homedir(), '.cache');
-	const candidates = [
-		path.join(cacheRoot, 'Tectonic'),
-		path.join(cacheRoot, 'tectonic')
-	];
-	for (const dir of candidates) {
-		const found = await findBundleInDir(dir, 2);
-		if (found) {
-			return found;
-		}
-	}
-	return undefined;
-}
-
-async function findBundleInDir(dir: string, depth: number): Promise<string | undefined> {
-	try {
-		const entries = await fs.readdir(dir, { withFileTypes: true });
-		const direct = entries.find(entry => entry.isFile() && entry.name.endsWith('.bundle'));
-		if (direct) {
-			return path.join(dir, direct.name);
-		}
-		if (depth <= 0) {
+function normalizeFieldValue(type: TemplateFieldSchema['type'] | undefined, value: any): string | number | boolean | string[] | undefined {
+	switch (type) {
+		case 'number': {
+			if (typeof value === 'number' && Number.isFinite(value)) {
+				return value;
+			}
+			if (typeof value === 'string' && value.trim()) {
+				const parsed = Number(value);
+				return Number.isFinite(parsed) ? parsed : undefined;
+			}
 			return undefined;
+		}
+		case 'boolean': {
+			if (typeof value === 'boolean') {
+				return value;
+			}
+			if (typeof value === 'string') {
+				if (value === 'true') {
+					return true;
+				}
+				if (value === 'false') {
+					return false;
+				}
+			}
+			return undefined;
+		}
+		case 'string[]': {
+			if (Array.isArray(value)) {
+				return value.map(entry => entry === null || entry === undefined ? '' : String(entry));
+			}
+			if (typeof value === 'string') {
+				return value.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+			}
+			return undefined;
+		}
+		case 'latex':
+		case 'string':
+		default: {
+			if (value === null || value === undefined) {
+				return '';
+			}
+			return typeof value === 'string' ? value : String(value);
+		}
+	}
+}
+
+function applySchemaDefaults(project: DiagramadorProject, template: TemplatePackage): boolean {
+	const data = isPlainObject(project.data) ? project.data : {};
+	const next: Record<string, any> = { ...data };
+	const schema = Array.isArray(template.manifest.schema) ? template.manifest.schema : [];
+	const defaults = isPlainObject(template.manifest.defaults) ? template.manifest.defaults : {};
+	let changed = false;
+	for (const field of schema) {
+		if (!Object.prototype.hasOwnProperty.call(next, field.key)) {
+			const fallback = Object.prototype.hasOwnProperty.call(defaults, field.key)
+				? cloneDefaultValue(defaults[field.key])
+				: defaultValueForType(field.type);
+			next[field.key] = fallback;
+			changed = true;
+		}
+	}
+	if (changed) {
+		project.data = next;
+	}
+	return changed;
+}
+
+function cloneDefaultValue(value: any): any {
+	if (Array.isArray(value)) {
+		return value.slice();
+	}
+	return value;
+}
+
+function defaultValueForType(type: TemplateFieldSchema['type']): any {
+	switch (type) {
+		case 'string[]':
+			return [];
+		case 'number':
+			return 0;
+		case 'boolean':
+			return false;
+		case 'latex':
+		case 'string':
+		default:
+			return '';
+	}
+}
+
+function slugify(value: string): string {
+	return String(value)
+		.toLowerCase()
+		.normalize('NFKD')
+		.replace(/[^a-z0-9\s-_]/g, '')
+		.trim()
+		.replace(/[\s_-]+/g, '-')
+		.replace(/^-+|-+$/g, '');
+}
+
+function cloneData<T>(data: T): T {
+	return JSON.parse(JSON.stringify(data)) as T;
+}
+
+async function copyAssets(sourceDir: string, targetDir: string) {
+	if (!await fileExists(sourceDir)) {
+		return;
+	}
+	await fs.rm(targetDir, { recursive: true, force: true });
+	await copyDirectory(sourceDir, targetDir);
+}
+
+async function copyDirectory(sourceDir: string, targetDir: string) {
+	await fs.mkdir(targetDir, { recursive: true });
+	const entries = await fs.readdir(sourceDir, { withFileTypes: true });
+	for (const entry of entries) {
+		const sourcePath = path.join(sourceDir, entry.name);
+		const targetPath = path.join(targetDir, entry.name);
+		if (entry.isDirectory()) {
+			await copyDirectory(sourcePath, targetPath);
+		} else if (entry.isFile()) {
+			await fs.copyFile(sourcePath, targetPath);
+		}
+	}
+}
+
+async function listAssetEntries(dir: string): Promise<string[]> {
+	if (!await fileExists(dir)) {
+		return [];
+	}
+	const entries: string[] = [];
+	await collectAssetEntries(dir, dir, entries);
+	entries.sort();
+	return entries;
+}
+
+async function collectAssetEntries(rootDir: string, currentDir: string, entries: string[]) {
+	const dirents = await fs.readdir(currentDir, { withFileTypes: true });
+	for (const entry of dirents) {
+		const sourcePath = path.join(currentDir, entry.name);
+		if (entry.isDirectory()) {
+			await collectAssetEntries(rootDir, sourcePath, entries);
+		} else if (entry.isFile()) {
+			const rel = path.relative(rootDir, sourcePath).split(path.sep).join('/');
+			entries.push(rel);
+		}
+	}
+}
+
+function normalizeAssetPath(value: any): string | undefined {
+	if (typeof value !== 'string') {
+		return undefined;
+	}
+	const normalized = value.replace(/\\/g, '/').trim();
+	if (!normalized || normalized.startsWith('/')) {
+		return undefined;
+	}
+	const parts = normalized.split('/').filter(Boolean);
+	if (!parts.length || parts.some(part => part === '.' || part === '..')) {
+		return undefined;
+	}
+	return parts.join('/');
+}
+
+async function createTemplateZip(template: TemplatePackage, targetPath: string): Promise<void> {
+	const zip = new yazl.ZipFile();
+	const output = await fs.open(targetPath, 'w');
+	const stream = output.createWriteStream();
+	zip.outputStream.pipe(stream);
+	zip.addFile(path.join(template.dir, 'template.json'), 'template.json');
+	zip.addFile(path.join(template.dir, template.manifest.entry), template.manifest.entry);
+	const previewPath = path.join(template.dir, 'preview_data.json');
+	if (await fileExists(previewPath)) {
+		zip.addFile(previewPath, 'preview_data.json');
+	}
+	if (await fileExists(template.assetsDir)) {
+		await addDirectoryToZip(zip, template.assetsDir, 'assets');
+	}
+	zip.end();
+	await new Promise<void>((resolve, reject) => {
+		stream.on('close', resolve);
+		stream.on('error', reject);
+	});
+	await output.close();
+}
+
+async function addDirectoryToZip(zip: yazl.ZipFile, sourceDir: string, prefix: string) {
+	const entries = await fs.readdir(sourceDir, { withFileTypes: true });
+	if (!entries.length) {
+		zip.addEmptyDirectory(prefix);
+		return;
+	}
+	for (const entry of entries) {
+		const sourcePath = path.join(sourceDir, entry.name);
+		const targetPath = path.posix.join(prefix, entry.name);
+		if (entry.isDirectory()) {
+			await addDirectoryToZip(zip, sourcePath, targetPath);
+		} else if (entry.isFile()) {
+			zip.addFile(sourcePath, targetPath);
+		}
+	}
+}
+
+async function extractZipToDir(zipPath: string, targetDir: string): Promise<void> {
+	const root = path.resolve(targetDir);
+	await fs.mkdir(root, { recursive: true });
+	return new Promise((resolve, reject) => {
+		yauzl.open(zipPath, { lazyEntries: true }, (err, zipfile) => {
+			if (err || !zipfile) {
+				reject(err ?? new Error('Falha ao abrir o zip.'));
+				return;
+			}
+			const onError = (error: Error) => {
+				zipfile.close();
+				reject(error);
+			};
+			zipfile.readEntry();
+			zipfile.on('entry', entry => {
+				const targetPath = resolveZipEntryPath(root, entry.fileName);
+				if (!targetPath) {
+					zipfile.readEntry();
+					return;
+				}
+				if (entry.fileName.endsWith('/')) {
+					fs.mkdir(targetPath, { recursive: true })
+						.then(() => zipfile.readEntry())
+						.catch(onError);
+					return;
+				}
+				fs.mkdir(path.dirname(targetPath), { recursive: true }).then(() => {
+					zipfile.openReadStream(entry, (streamErr, stream) => {
+						if (streamErr || !stream) {
+							onError(streamErr ?? new Error('Falha ao ler zip.'));
+							return;
+						}
+						const output = fsSync.createWriteStream(targetPath);
+						output.on('close', () => zipfile.readEntry());
+						output.on('error', onError);
+						stream.on('error', onError);
+						stream.pipe(output);
+					});
+				}).catch(onError);
+			});
+			zipfile.on('end', () => {
+				zipfile.close();
+				resolve();
+			});
+			zipfile.on('error', onError);
+		});
+	});
+}
+
+function resolveZipEntryPath(root: string, entryName: string): string | undefined {
+	const normalized = entryName.replace(/\\/g, '/');
+	if (!normalized || path.isAbsolute(normalized)) {
+		return undefined;
+	}
+	const parts = normalized.split('/');
+	if (parts.some(part => part === '..')) {
+		return undefined;
+	}
+	const targetPath = path.resolve(root, normalized);
+	if (targetPath === root) {
+		return targetPath;
+	}
+	if (!targetPath.startsWith(`${root}${path.sep}`)) {
+		return undefined;
+	}
+	return targetPath;
+}
+
+async function findTemplateRoot(root: string): Promise<string | undefined> {
+	try {
+		const entries = await fs.readdir(root, { withFileTypes: true });
+		const hasManifest = entries.some(entry => entry.isFile() && entry.name === 'template.json');
+		const hasMain = entries.some(entry => entry.isFile() && entry.name === 'main.tex');
+		if (hasManifest && hasMain) {
+			return root;
 		}
 		for (const entry of entries) {
 			if (!entry.isDirectory()) {
 				continue;
 			}
-			const nested = await findBundleInDir(path.join(dir, entry.name), depth - 1);
-			if (nested) {
-				return nested;
+			const found = await findTemplateRoot(path.join(root, entry.name));
+			if (found) {
+				return found;
 			}
 		}
 		return undefined;
@@ -1217,15 +1689,6 @@ async function fileExists(filePath: string) {
 	} catch {
 		return false;
 	}
-}
-
-function getNonce() {
-	let text = '';
-	const possible = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
-	for (let i = 0; i < 32; i += 1) {
-		text += possible.charAt(Math.floor(Math.random() * possible.length));
-	}
-	return text;
 }
 
 export function deactivate() { }

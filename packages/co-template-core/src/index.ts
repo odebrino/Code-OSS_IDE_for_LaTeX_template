@@ -6,9 +6,10 @@
 import { ChildProcess, spawn } from 'child_process';
 import crypto from 'crypto';
 import fs from 'fs/promises';
+import os from 'os';
 import path from 'path';
 
-export type TemplateFieldType = 'string' | 'string[]' | 'number' | 'boolean';
+export type TemplateFieldType = 'string' | 'string[]' | 'number' | 'boolean' | 'latex';
 
 export type TemplateFieldSchema = {
 	key: string;
@@ -87,6 +88,48 @@ export type BuildPreviewOptions = {
 };
 
 const DEFAULT_SHARED_STORAGE = 'co-template-core';
+const PREVIEW_TEX_NAME = 'main.tex';
+const DATA_TEX_NAME = 'co_data.tex';
+
+export async function resolveTectonicBundlePath(options: {
+	configuredPath?: string;
+	globalStoragePath?: string;
+	env?: NodeJS.ProcessEnv;
+	cacheRoot?: string;
+}): Promise<string | undefined> {
+	const env = options.env ?? process.env;
+	const envBundle = normalizeOptionalPath(env.CO_TECTONIC_BUNDLE) ?? normalizeOptionalPath(env.TECTONIC_BUNDLE);
+	const fromEnv = await pickExistingPath(envBundle);
+	if (fromEnv) {
+		return fromEnv;
+	}
+	const fromConfig = await pickExistingPath(options.configuredPath);
+	if (fromConfig) {
+		return fromConfig;
+	}
+	if (options.globalStoragePath) {
+		const storageBundle = path.join(options.globalStoragePath, 'tectonic.bundle');
+		if (await fileExists(storageBundle)) {
+			return storageBundle;
+		}
+	}
+	const cacheRoot = options.cacheRoot ?? process.env.XDG_CACHE_HOME ?? path.join(os.homedir(), '.cache');
+	const cached = await findBundleInCache(cacheRoot);
+	if (!cached) {
+		return undefined;
+	}
+	if (options.globalStoragePath) {
+		const storageBundle = path.join(options.globalStoragePath, 'tectonic.bundle');
+		try {
+			await fs.mkdir(options.globalStoragePath, { recursive: true });
+			await fs.copyFile(cached, storageBundle);
+			return storageBundle;
+		} catch {
+			return cached;
+		}
+	}
+	return cached;
+}
 
 export function resolveTemplateStoragePaths(globalStoragePath: string, repoRoot?: string): TemplateStoragePaths {
 	const sharedRoot = path.join(path.dirname(globalStoragePath), DEFAULT_SHARED_STORAGE);
@@ -203,6 +246,9 @@ export function validateTemplate(manifest: TemplateManifest, options?: { dirName
 				errors.push(`Schema duplicado para key "${field.key}".`);
 			} else {
 				seen.add(field.key);
+				if (!/^[A-Za-z@]+$/.test(field.key)) {
+					errors.push(`Schema: "key" invalida para "${field.key}". Use apenas letras A-Z ou @; macros TeX terminam em caracteres nao alfabeticos.`);
+				}
 			}
 			if (!field.label || typeof field.label !== 'string') {
 				errors.push(`Schema: "label" invalida para key "${field.key}".`);
@@ -221,15 +267,21 @@ export function validateTemplate(manifest: TemplateManifest, options?: { dirName
 	return { ok: errors.length === 0, errors, warnings };
 }
 
-export function renderTemplate(source: string, data: Record<string, any>): string {
+export function renderTemplate(source: string, data: Record<string, any>, schema?: TemplateFieldSchema[]): string {
+	return renderTemplateNormalized(source, normalizeTemplateData(data, schema));
+}
+
+function renderTemplateNormalized(source: string, normalized: Record<string, string>): string {
 	let output = source;
-	const normalized = normalizeTemplateData(data);
 	for (const [key, value] of Object.entries(normalized)) {
 		const placeholder = new RegExp(`\\{\\{\\s*${escapeRegExp(key)}\\s*\\}\\}`, 'g');
 		output = output.replace(placeholder, value);
-		output = replaceNewCommand(output, key, value);
 	}
 	return output;
+}
+
+function shouldRenderPlaceholders(source: string): boolean {
+	return /\{\{\s*[A-Za-z@]+[\s\S]*?\}\}/.test(source);
 }
 
 export async function buildPreview(
@@ -240,20 +292,30 @@ export async function buildPreview(
 ): Promise<TemplateBuildResult> {
 	await fs.mkdir(outDir, { recursive: true });
 	const data = mergeTemplateData(template.manifest.defaults, previewData);
-	const tex = renderTemplate(template.mainTex, data);
-	const texPath = path.join(outDir, 'preview.tex');
+	const normalized = normalizeTemplateData(data, template.manifest.schema);
+	const tex = shouldRenderPlaceholders(template.mainTex)
+		? renderTemplateNormalized(template.mainTex, normalized)
+		: template.mainTex;
+	const texPath = path.join(outDir, PREVIEW_TEX_NAME);
+	const dataTexPath = path.join(outDir, DATA_TEX_NAME);
+	const dataTex = buildCoDataTex(normalized);
 	const previousTex = await readTextFile(texPath);
 	const texChanged = previousTex !== tex;
 	if (texChanged) {
 		await fs.writeFile(texPath, tex, 'utf8');
 	}
+	const previousDataTex = await readTextFile(dataTexPath);
+	if (previousDataTex !== dataTex) {
+		await fs.writeFile(dataTexPath, dataTex, 'utf8');
+	}
 	const assetsOutDir = path.join(outDir, 'assets');
 	const assetsCachePath = path.join(outDir, '.assets-cache');
 	const assetsSync = await syncAssetsIfChanged(template.assetsDir, assetsOutDir, assetsCachePath);
 	const pdfPath = path.join(outDir, 'preview.pdf');
+	const rawPdfPath = path.join(outDir, `${path.parse(texPath).name}.pdf`);
 	const logPath = path.join(outDir, 'build.log');
 	const buildCachePath = path.join(outDir, '.preview-cache.json');
-	const texHash = hashText(tex);
+	const texHash = hashText(`${tex}\n${dataTex}`);
 	const buildCache = await readBuildCache(buildCachePath);
 	const cacheHit = Boolean(buildCache
 		&& buildCache.texHash === texHash
@@ -275,6 +337,7 @@ export async function buildPreview(
 	const result = await runTectonic(texPath, outDir, options?.onProcess, options);
 	await writeBuildLog(logPath, result);
 	if (result.ok) {
+		await ensurePreviewPdf(rawPdfPath, pdfPath);
 		await writeBuildCache(buildCachePath, {
 			texHash,
 			assetsSignature: assetsSync.signature
@@ -369,7 +432,7 @@ export class TemplateBuildService {
 				notFound: false,
 				pdfPath: path.join(request.outDir, 'preview.pdf'),
 				logPath: path.join(request.outDir, 'build.log'),
-				texPath: path.join(request.outDir, 'preview.tex')
+				texPath: path.join(request.outDir, PREVIEW_TEX_NAME)
 			});
 		}
 	}
@@ -387,7 +450,7 @@ export class TemplateBuildService {
 }
 
 function isValidFieldType(value: any): value is TemplateFieldType {
-	return value === 'string' || value === 'string[]' || value === 'number' || value === 'boolean';
+	return value === 'string' || value === 'string[]' || value === 'number' || value === 'boolean' || value === 'latex';
 }
 
 async function readTemplatesFromDir(dir: string, readOnly: boolean): Promise<TemplateSummary[]> {
@@ -504,33 +567,63 @@ async function writeBuildCache(filePath: string, cache: { texHash: string; asset
 	await fs.writeFile(filePath, content, 'utf8');
 }
 
+async function ensurePreviewPdf(sourcePath: string, targetPath: string): Promise<void> {
+	if (!await fileExists(sourcePath)) {
+		return;
+	}
+	if (sourcePath === targetPath) {
+		return;
+	}
+	try {
+		await fs.rename(sourcePath, targetPath);
+	} catch {
+		await fs.copyFile(sourcePath, targetPath);
+	}
+}
+
 function mergeTemplateData(defaults: Record<string, any> | undefined, previewData: Record<string, any>): Record<string, any> {
 	const base = defaults && typeof defaults === 'object' && !Array.isArray(defaults) ? defaults : {};
 	return { ...base, ...previewData };
 }
 
-function normalizeTemplateData(data: Record<string, any>) {
+function normalizeTemplateData(data: Record<string, any>, schema?: TemplateFieldSchema[]) {
+	const rawKeys = schema ? new Set(schema.filter(field => field.type === 'latex').map(field => field.key)) : undefined;
 	const normalized: Record<string, string> = {};
 	for (const [key, value] of Object.entries(data ?? {})) {
-		normalized[key] = formatTemplateValue(value);
+		const isRaw = rawKeys?.has(key) ?? false;
+		normalized[key] = formatTemplateValue(value, isRaw);
 	}
 	return normalized;
 }
 
-function formatTemplateValue(value: any): string {
+function buildCoDataTex(normalized: Record<string, string>): string {
+	const entries = Object.entries(normalized)
+		.map(([key, value]) => [key.trim(), value] as const)
+		.filter(([key]) => key.length > 0)
+		.sort(([a], [b]) => a.localeCompare(b));
+	const lines = ['% Generated by co-template-core.'];
+	for (const [key, value] of entries) {
+		lines.push(`\\def\\${key}{${value}}`);
+	}
+	return `${lines.join('\n')}\n`;
+}
+
+function formatTemplateValue(value: any, raw: boolean): string {
 	if (Array.isArray(value)) {
-		return value.map(entry => escapeLatexBlock(String(entry ?? ''))).join('\\\\');
+		const joined = value.map(entry => entry === null || entry === undefined ? '' : String(entry)).join('\n');
+		return raw ? joined : escapeLatexBlock(joined);
 	}
 	if (typeof value === 'number') {
 		return Number.isFinite(value) ? String(value) : '';
 	}
 	if (typeof value === 'boolean') {
-		return value ? 'true' : 'false';
+		return String(value);
 	}
 	if (value === null || value === undefined) {
 		return '';
 	}
-	return escapeLatexBlock(String(value));
+	const text = String(value);
+	return raw ? text : escapeLatexBlock(text);
 }
 
 function escapeLatex(value: string): string {
@@ -556,11 +649,6 @@ function escapeLatexBlock(value: string): string {
 
 function escapeRegExp(value: string): string {
 	return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-
-function replaceNewCommand(source: string, name: string, value: string): string {
-	const pattern = new RegExp(`\\\\newcommand\\{\\\\${escapeRegExp(name)}\\}\\{[^}]*\\}`, 'g');
-	return source.replace(pattern, `\\newcommand{\\${name}}{${value}}`);
 }
 
 function hashText(value: string): string {
@@ -640,6 +728,64 @@ async function writeBuildLog(logPath: string, result: { ok: boolean; stdout: str
 		result.stderr
 	].filter(Boolean).join('\n');
 	await fs.writeFile(logPath, lines || 'Sem log.', 'utf8');
+}
+
+function normalizeOptionalPath(value: string | undefined): string | undefined {
+	if (!value || typeof value !== 'string') {
+		return undefined;
+	}
+	const trimmed = value.trim();
+	return trimmed ? trimmed : undefined;
+}
+
+async function pickExistingPath(value: string | undefined): Promise<string | undefined> {
+	const normalized = normalizeOptionalPath(value);
+	if (!normalized) {
+		return undefined;
+	}
+	if (await fileExists(normalized)) {
+		return normalized;
+	}
+	return undefined;
+}
+
+async function findBundleInCache(cacheRoot: string): Promise<string | undefined> {
+	const candidates = [
+		path.join(cacheRoot, 'Tectonic'),
+		path.join(cacheRoot, 'tectonic')
+	];
+	for (const dir of candidates) {
+		const found = await findBundleInDir(dir, 2);
+		if (found) {
+			return found;
+		}
+	}
+	return undefined;
+}
+
+async function findBundleInDir(dir: string, depth: number): Promise<string | undefined> {
+	try {
+		const entries = await fs.readdir(dir, { withFileTypes: true });
+		const direct = entries.find(entry => entry.isFile() && entry.name.endsWith('.bundle'));
+		if (direct) {
+			return path.join(dir, direct.name);
+		}
+		if (depth <= 0) {
+			return undefined;
+		}
+		for (const entry of entries) {
+			if (!entry.isDirectory()) {
+				continue;
+			}
+			const nested = await findBundleInDir(path.join(dir, entry.name), depth - 1);
+			if (nested) {
+				return nested;
+			}
+		}
+		return undefined;
+	} catch {
+		return undefined;
+	}
 }
 
 async function runTectonic(
