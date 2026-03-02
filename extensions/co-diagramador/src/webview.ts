@@ -87,7 +87,12 @@ export class DiagramadorViewProvider implements vscode.WebviewViewProvider {
 		this.view = view;
 		view.webview.options = {
 			enableScripts: true,
-			localResourceRoots: [this.context.extensionUri]
+			localResourceRoots: [
+				this.context.extensionUri,
+				vscode.Uri.joinPath(this.context.extensionUri, 'resources'),
+				vscode.Uri.joinPath(this.context.extensionUri, 'media'),
+				vscode.Uri.joinPath(this.context.extensionUri, 'dist')
+			]
 		};
 		this.refreshWebview(true);
 		view.webview.onDidReceiveMessage(message => this.onMessage(message, view.webview));
@@ -151,8 +156,9 @@ function getDiagramadorHtml(
 	const nonce = getNonce();
 	const csp = [
 		"default-src 'none'",
-		`img-src ${webview.cspSource} blob:`,
+		`img-src ${webview.cspSource} https: data: blob:`,
 		`style-src ${webview.cspSource} 'unsafe-inline'`,
+		`font-src ${webview.cspSource}`,
 		`script-src 'nonce-${nonce}'`
 	].join('; ');
 	const stateJson = JSON.stringify(state).replace(/</g, '\\u003c');
@@ -647,7 +653,12 @@ function getDiagramadorHtml(
 	</div>
 
 <script nonce="${nonce}">
-	const vscode = acquireVsCodeApi();
+	console.log('[co-diagramador] webview boot');
+	window.addEventListener('error', e => console.error('[co-diagramador] window.error', e.error || e.message));
+	window.addEventListener('unhandledrejection', e => console.error('[co-diagramador] unhandledrejection', e.reason));
+	const vscode = (typeof acquireVsCodeApi === 'function')
+		? acquireVsCodeApi()
+		: { postMessage: () => { }, getState: () => undefined, setState: () => { } };
 	let state = ${stateJson};
 
 	const statusEl = document.getElementById('status');
@@ -683,6 +694,7 @@ function getDiagramadorHtml(
 	const templateAssetsList = document.getElementById('templateAssetsList');
 	const templateAssetInput = document.getElementById('templateAssetInput');
 	const templateAddAssetButton = document.getElementById('templateAddAssetButton');
+	const noop = () => { };
 
 	let activeTab = 'document';
 	let templateDraft = { manifestText: '', mainTex: '', previewText: '' };
@@ -1236,13 +1248,21 @@ function getDiagramadorHtml(
 		setBuildError(state.buildError, state.buildLogPath);
 	}
 
+	function boot() {
+		if (!statusEl || !newTaskButton || !templateSelect || !tabDocument || !tabTemplates || !templateSaveButton) {
+			console.error('[co-diagramador] missing required DOM elements');
+			return;
+		}
+
 	newTaskButton.addEventListener('click', () => {
+		console.log('[co-diagramador] new task clicked');
 		flushPendingFieldUpdates();
 		const templateId = templateSelect.value || state.selectedTemplateId || '';
 		vscode.postMessage({ type: 'createTask', templateId });
 	});
 
 	templateSelect.addEventListener('change', () => {
+		console.log('[co-diagramador] template changed');
 		const value = templateSelect.value;
 		if (value === state.selectedTemplateId) {
 			return;
@@ -1253,11 +1273,13 @@ function getDiagramadorHtml(
 	});
 
 	tabDocument.addEventListener('click', () => {
+		console.log('[co-diagramador] tab document clicked');
 		flushPendingFieldUpdates();
 		applyActiveTab('document', true);
 	});
 
 	tabTemplates.addEventListener('click', () => {
+		console.log('[co-diagramador] tab templates clicked');
 		flushPendingFieldUpdates();
 		applyActiveTab('templates', true);
 	});
@@ -1311,6 +1333,8 @@ function getDiagramadorHtml(
 	});
 
 	templateSaveButton.addEventListener('click', () => {
+		console.log('[co-diagramador] generate clicked');
+		vscode.postMessage({ type: 'co-diagramador:generate', payload: { source: 'templateSaveButton' } });
 		if (!validateTemplateDraft()) {
 			return;
 		}
@@ -1324,10 +1348,12 @@ function getDiagramadorHtml(
 	});
 
 	buildLogButton.addEventListener('click', () => {
+		console.log('[co-diagramador] open build log clicked');
 		vscode.postMessage({ type: 'openBuildLog', scope: 'document' });
 	});
 
 	templateBuildLogButton.addEventListener('click', () => {
+		console.log('[co-diagramador] open template log clicked');
 		vscode.postMessage({ type: 'openBuildLog', scope: 'template' });
 	});
 
@@ -1349,6 +1375,7 @@ function getDiagramadorHtml(
 	});
 
 	templateAddAssetButton.addEventListener('click', () => {
+		console.log('[co-diagramador] add asset clicked');
 		templateAssetInput.click();
 	});
 
@@ -1366,13 +1393,26 @@ function getDiagramadorHtml(
 
 	window.addEventListener('message', (event) => {
 		const msg = event.data;
+		console.log('[co-diagramador] received', msg);
 		if (msg.type === 'state') {
 			setState(msg.state);
+		}
+		if (msg.type === 'co-diagramador:ack') {
+			console.log('[co-diagramador] ack', msg);
 		}
 	});
 
 	setState(state);
 	vscode.postMessage({ type: 'ready' });
+	window.__CO_DIAGRAMADOR_READY__ = true;
+	console.log('[co-diagramador] ready');
+	}
+
+	if (document.readyState === 'loading') {
+		window.addEventListener('DOMContentLoaded', boot, { once: true });
+	} else {
+		boot();
+	}
 </script>
 </body>
 </html>`;
