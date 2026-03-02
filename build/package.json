@@ -5,6 +5,7 @@
   "devDependencies": {
     "@azure/core-auth": "^1.9.0",
     "@parcel/watcher": "^2.5.6",
+    "@parcel/watcher-wasm": "^2.5.6",
     "@azure/cosmos": "^3",
     "@azure/identity": "^4.2.1",
     "@azure/msal-node": "^2.16.1",
