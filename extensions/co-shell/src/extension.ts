@@ -4,10 +4,17 @@
  *--------------------------------------------------------------------------------------------*/
 
 import * as vscode from 'vscode';
+import * as fsSync from 'fs';
 import path from 'path';
 import fs from 'fs/promises';
 import { spawn } from 'child_process';
 import { openHomePanel, registerAdminView } from './webview';
+import {
+	isAdminEmailForList,
+	loadAdminsFrom,
+	resolveExistingAdminsPath
+} from './lib/admins';
+import { createCoShellTestingHooks } from './testing/hooks';
 
 type Role = 'student' | 'admin';
 
@@ -42,7 +49,7 @@ export async function activate(context: vscode.ExtensionContext) {
 		vscode.commands.registerCommand('coShell.enterAdminMode', async () => {
 			const email = await vscode.window.showInputBox({
 				prompt: 'Admin email',
-				placeHolder: 'admin@escola.com'
+				placeHolder: 'admin email'
 			});
 			if (!email) {
 				return;
@@ -56,6 +63,26 @@ export async function activate(context: vscode.ExtensionContext) {
 			await enterAdminMode(context);
 		})
 	);
+
+	if (process.env.CO_TESTING === '1') {
+		const config = vscode.workspace.getConfiguration('coShell');
+		const configuredPath = config.get<string>('adminsFile');
+		const hooks = createCoShellTestingHooks({
+			extensionPath: context.extensionPath,
+			configuredPath,
+			cwd: process.cwd(),
+			existsSync: target => fsSync.existsSync(target)
+		});
+		return {
+			__test: {
+				resolveAdminsPathCandidates: () => hooks.resolveAdminsPathCandidates(),
+				loadAdminsFrom: (filePath?: string) => hooks.loadAdminsFrom(filePath),
+				isAdminEmail: (email: string, admins?: string[]) => hooks.isAdminEmail(email, admins)
+			}
+		};
+	}
+
+	return undefined;
 }
 
 async function setRole(context: vscode.ExtensionContext, role: Role) {
@@ -155,31 +182,28 @@ function createMessageHandler(context: vscode.ExtensionContext) {
 
 async function isAdminEmail(context: vscode.ExtensionContext, email: string): Promise<boolean> {
 	const admins = await loadAdmins(context);
-	return admins.has(email.trim().toLowerCase());
+	return isAdminEmailForList(email, admins);
 }
 
-async function loadAdmins(context: vscode.ExtensionContext): Promise<Set<string>> {
+async function loadAdmins(context: vscode.ExtensionContext): Promise<string[]> {
 	const config = vscode.workspace.getConfiguration('coShell');
 	const configuredPath = config.get<string>('adminsFile');
-	const adminFile = configuredPath
-		? resolveAdminPath(context.extensionPath, configuredPath)
-		: path.join(context.extensionPath, 'config', 'admins.json');
-
-	try {
-		const raw = await fs.readFile(adminFile, 'utf8');
-		const data = JSON.parse(raw) as { admins?: string[] };
-		const list = (data.admins ?? []).map(value => value.trim().toLowerCase());
-		return new Set(list);
-	} catch {
-		return new Set();
+	const adminFile = resolveAdminsFilePath(context.extensionPath, configuredPath);
+	if (!adminFile) {
+		return [];
 	}
+	return loadAdminsFrom(adminFile);
 }
 
-function resolveAdminPath(extensionPath: string, configuredPath: string) {
-	if (path.isAbsolute(configuredPath)) {
-		return configuredPath;
-	}
-	return path.join(extensionPath, configuredPath);
+function resolveAdminsFilePath(extensionPath: string, configuredPath: string | undefined): string | undefined {
+	return resolveExistingAdminsPath(
+		{
+			extensionPath,
+			configuredPath,
+			cwd: process.cwd()
+		},
+		target => fsSync.existsSync(target)
+	);
 }
 
 async function generatePdf(
