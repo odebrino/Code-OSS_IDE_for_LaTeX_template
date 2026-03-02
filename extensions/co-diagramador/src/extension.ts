@@ -42,10 +42,11 @@ import { PdfPreviewManager } from 'co-preview-core';
 
 export async function activate(context: vscode.ExtensionContext) {
 	const diagramadorController = new DiagramadorController(context);
+	diagramadorController.log('activate: starting');
 	await diagramadorController.initialize();
 	const diagramadorProvider = registerDiagramadorView(
 		context,
-		(message) => diagramadorController?.handleMessage(message),
+		(message, webview) => diagramadorController?.handleMessage(message, webview),
 		() => diagramadorController.getState(),
 		() => diagramadorController?.onViewVisible()
 	);
@@ -54,6 +55,7 @@ export async function activate(context: vscode.ExtensionContext) {
 
 	context.subscriptions.push(
 		vscode.commands.registerCommand('co.diagramador.open', async () => {
+			diagramadorController.log('command: co.diagramador.open');
 			await diagramadorController?.open();
 		})
 	);
@@ -153,7 +155,7 @@ class DiagramadorController implements vscode.Disposable {
 		const baseDir = resolveDiagramadorBaseDir(context);
 		this.paths = resolveDiagramadorPaths(baseDir);
 		this.storage = new LocalStorageProvider(baseDir);
-		this.output = vscode.window.createOutputChannel('Diagramador');
+		this.output = vscode.window.createOutputChannel('CO Diagramador');
 		this.headerImagePath = path.join(extensionRoot, 'resources', this.headerImageName);
 		this.templateStorage = resolveTemplateStoragePaths(globalStoragePath, path.resolve(extensionRoot, '..', '..'));
 		this.buildService = new TemplateBuildService({
@@ -236,6 +238,7 @@ class DiagramadorController implements vscode.Disposable {
 	}
 
 	async open() {
+		this.log('open: requested');
 		await this.ensureInitialized();
 		await this.revealView();
 		await this.refreshTasks();
@@ -247,12 +250,17 @@ class DiagramadorController implements vscode.Disposable {
 		void this.scheduleTemplateBuild();
 	}
 
-	async handleMessage(message: any) {
+	async handleMessage(message: any, webview?: vscode.Webview) {
 		try {
+			this.log(`webview message: ${String(message?.type ?? 'unknown')}`);
 			await this.ensureInitialized();
 			switch (message?.type) {
 				case 'ready':
 					this.viewProvider?.sendState(this.getState());
+					return;
+				case 'co-diagramador:generate':
+					this.log('webview action: co-diagramador:generate');
+					webview?.postMessage({ type: 'co-diagramador:ack', ok: true, receivedType: 'co-diagramador:generate' });
 					return;
 				case 'setTab':
 					this.setActiveTab(message?.tab);
@@ -314,6 +322,10 @@ class DiagramadorController implements vscode.Disposable {
 			void vscode.window.showErrorMessage(`Falha ao processar acao: ${details}`);
 			this.viewProvider?.sendState(this.getState());
 		}
+	}
+
+	log(message: string) {
+		this.output.appendLine(`[${new Date().toISOString()}] ${message}`);
 	}
 
 	private setActiveTab(tab: any) {
