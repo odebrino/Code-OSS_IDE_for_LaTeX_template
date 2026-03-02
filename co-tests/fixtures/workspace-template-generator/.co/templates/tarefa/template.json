@@ -1,0 +1,10 @@
+{
+  "id": "tarefa",
+  "name": "Tarefa",
+  "version": "1.0.0",
+  "description": "Template de tarefa para testes",
+  "entry": "main.tex",
+  "schema": [
+    { "key": "Title", "type": "string", "label": "Titulo" }
+  ]
+}
