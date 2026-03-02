@@ -3,7 +3,7 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import * as watcher from '@parcel/watcher';
+import { createRequire } from 'node:module';
 import es from 'event-stream';
 import fs from 'fs';
 import filter from 'gulp-filter';
@@ -21,7 +21,15 @@ interface WatchOptions {
 
 type EventType = 'change' | 'add' | 'unlink';
 
-function toEventType(type: watcher.EventType): EventType {
+type WatcherEventType = 'create' | 'update' | 'delete';
+type WatcherEvent = { path: string; type: WatcherEventType };
+type WatcherSubscribeCallback = (err: Error | null, events: WatcherEvent[]) => unknown;
+type WatcherAsyncSubscription = { unsubscribe(): Promise<void> };
+type WatcherLike = { subscribe(dir: string, fn: WatcherSubscribeCallback, opts?: { ignore?: string[] }): Promise<WatcherAsyncSubscription> };
+
+const require = createRequire(import.meta.url);
+
+function toEventType(type: WatcherEventType): EventType {
 	switch (type) {
 		case 'create': return 'add';
 		case 'update': return 'change';
@@ -29,12 +37,59 @@ function toEventType(type: watcher.EventType): EventType {
 	}
 }
 
-const subscriptionCache: Map<string, { stream: Stream; subscription: Promise<watcher.AsyncSubscription> }> = new Map();
+function isNativeWatcherLoadError(err: unknown): boolean {
+	const anyError = err as { code?: unknown; message?: unknown };
+	const code = typeof anyError?.code === 'string' ? anyError.code : '';
+	const message = typeof anyError?.message === 'string' ? anyError.message : String(err ?? '');
+	return code === 'ERR_DLOPEN_FAILED'
+		|| message.includes('GLIBC_')
+		|| message.includes('version `GLIBC_')
+		|| message.includes('not found (required by');
+}
+
+let _watcherPromise: Promise<WatcherLike> | undefined;
+
+async function getWatcher(): Promise<WatcherLike> {
+	if (_watcherPromise) {
+		return _watcherPromise;
+	}
+
+	_watcherPromise = (async () => {
+		if (process.env.VSCODE_FORCE_WATCHER_WASM === '1') {
+			return loadWasmWatcher();
+		}
+
+		try {
+			const nativeWatcher = require('@parcel/watcher') as WatcherLike;
+			return { subscribe: nativeWatcher.subscribe.bind(nativeWatcher) };
+		} catch (err) {
+			if (!isNativeWatcherLoadError(err)) {
+				throw err;
+			}
+			return loadWasmWatcher();
+		}
+	})();
+
+	return _watcherPromise;
+}
+
+async function loadWasmWatcher(): Promise<WatcherLike> {
+	const wasm = require('@parcel/watcher-wasm') as {
+		default?: (() => unknown) | unknown;
+		subscribe: WatcherLike['subscribe'];
+	};
+	if (typeof wasm.default === 'function') {
+		await wasm.default();
+	}
+	return { subscribe: wasm.subscribe.bind(wasm) };
+}
+
+const subscriptionCache: Map<string, { stream: Stream; subscription: Promise<WatcherAsyncSubscription> }> = new Map();
 
 function createWatcher(root: string): Stream {
 	const result = es.through();
 
-	const subscription = watcher.subscribe(root, (err, events) => {
+	const subscription = getWatcher().then(w => w.subscribe(root, (err, events) => {
 		if (err) {
 			result.emit('error', err);
 			return;
@@ -60,7 +115,7 @@ function createWatcher(root: string): Stream {
 			'**/.git/**',
 			'**/out/**'
 		]
-	});
+	}));
 
 	subscription.catch(err => result.emit('error', err));
 
