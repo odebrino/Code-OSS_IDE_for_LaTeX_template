@@ -1,0 +1,38 @@
+{
+	"name": "co-template-generator",
+	"displayName": "CO Template Generator",
+	"description": "Template generator utilities for CO",
+	"icon": "resources/co-view.svg",
+	"publisher": "odebrino",
+	"version": "0.0.1",
+	"license": "MIT",
+	"engines": {
+		"vscode": "^1.90.0"
+	},
+	"categories": [
+		"Other"
+	],
+	"main": "./out/extension.js",
+	"activationEvents": [
+		"onCommand:co.templateGenerator.open"
+	],
+	"capabilities": {
+		"virtualWorkspaces": true,
+		"untrustedWorkspaces": {
+			"supported": true
+		}
+	},
+	"devDependencies": {
+		"@types/node": "^22.18.10"
+	},
+	"contributes": {
+		"commands": [
+			{ "command": "co.templateGenerator.open", "title": "CO: Open Template Generator" }
+		],
+		"menus": {
+			"commandPalette": [
+				{ "command": "co.templateGenerator.open" }
+			]
+		}
+	}
+}
