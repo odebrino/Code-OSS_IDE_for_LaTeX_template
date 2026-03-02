@@ -29,7 +29,7 @@ export type DataSetState = {
 	items: DataSetItemSummary[];
 };
 
-export type MessageHandler = (message: { type?: string; [key: string]: JsonValue | undefined }, webview: vscode.Webview) => void | Promise<void>;
+export type MessageHandler = (message: { type?: string;[key: string]: JsonValue | undefined }, webview: vscode.Webview) => void | Promise<void>;
 
 export class DataSetViewProvider implements vscode.WebviewViewProvider {
 	private view?: vscode.WebviewView;

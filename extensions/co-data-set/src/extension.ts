@@ -147,7 +147,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		ensureWatchers();
 	}
 
-	async function onMessage(message: { type?: string; [key: string]: JsonValue | undefined }): Promise<void> {
+	async function onMessage(message: { type?: string;[key: string]: JsonValue | undefined }): Promise<void> {
 		switch (message.type) {
 			case 'openItem': {
 				if (typeof message.id === 'string') {

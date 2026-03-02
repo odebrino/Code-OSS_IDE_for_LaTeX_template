@@ -26,9 +26,6 @@ import { IEditorService } from '../services/editor/common/editorService.js';
 import { IWorkbenchModeService } from '../services/layout/common/workbenchModeService.js';
 
 export class WorkbenchContextKeysHandler extends Disposable {
-
-	private readonly cozitosContext: IContextKey<boolean>;
-
 	private dirtyWorkingCopiesContext: IContextKey<boolean>;
 
 	private activeEditorGroupEmpty: IContextKey<boolean>;
@@ -87,7 +84,7 @@ export class WorkbenchContextKeysHandler extends Disposable {
 
 		// Cozitos mode (env driven)
 		const cozitosEnabled = this.isCozitosEnabled();
-		this.cozitosContext = this.contextKeyService.createKey('co.cozitos', cozitosEnabled);
+		this.contextKeyService.createKey('co.cozitos', cozitosEnabled);
 		setConstantContextKey('co.cozitos', cozitosEnabled);
 
 		// Platform

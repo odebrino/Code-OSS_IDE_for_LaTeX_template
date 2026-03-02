@@ -7,6 +7,7 @@ import { DisposableStore } from '../../../../../base/common/lifecycle.js';
 import { ensureNoDisposablesAreLeakedInTestSuite } from '../../../../../base/test/common/utils.js';
 import { CommandsRegistry } from '../../../../../platform/commands/common/commands.js';
 import { InstantiationService } from '../../../../../platform/instantiation/common/instantiationService.js';
+import { MockContextKeyService } from '../../../../../platform/keybinding/test/common/mockKeybindingService.js';
 import { NullLogService } from '../../../../../platform/log/common/log.js';
 import { NullExtensionService } from '../../../extensions/common/extensions.js';
 import { CommandService } from '../../common/commandService.js';
@@ -28,7 +29,7 @@ suite('CommandService', function () {
 				lastEvent = activationEvent;
 				return super.activateByEvent(activationEvent);
 			}
-		}, new NullLogService()));
+		}, new NullLogService(), new MockContextKeyService()));
 
 		return service.executeCommand('foo').then(() => {
 			assert.ok(lastEvent, 'onCommand:foo');
@@ -48,7 +49,7 @@ suite('CommandService', function () {
 			}
 		};
 
-		const service = store.add(new CommandService(new InstantiationService(), extensionService, new NullLogService()));
+		const service = store.add(new CommandService(new InstantiationService(), extensionService, new NullLogService(), new MockContextKeyService()));
 
 		await extensionService.whenInstalledExtensionsRegistered();
 
@@ -66,7 +67,7 @@ suite('CommandService', function () {
 			override whenInstalledExtensionsRegistered() {
 				return new Promise<boolean>(_resolve => { /*ignore*/ });
 			}
-		}, new NullLogService()));
+		}, new NullLogService(), new MockContextKeyService()));
 
 		service.executeCommand('bar');
 		assert.strictEqual(callCounter, 1);
@@ -83,7 +84,7 @@ suite('CommandService', function () {
 			override whenInstalledExtensionsRegistered() {
 				return whenInstalledExtensionsRegistered;
 			}
-		}, new NullLogService()));
+		}, new NullLogService(), new MockContextKeyService()));
 
 		const r = service.executeCommand('bar');
 		assert.strictEqual(callCounter, 0);
@@ -123,7 +124,7 @@ suite('CommandService', function () {
 				return Promise.resolve();
 			}
 
-		}, new NullLogService()));
+		}, new NullLogService(), new MockContextKeyService()));
 
 		return service.executeCommand('farboo').then(() => {
 			assert.strictEqual(callCounter, 1);
@@ -164,7 +165,7 @@ suite('CommandService', function () {
 				return Promise.resolve();
 			}
 
-		}, new NullLogService()));
+		}, new NullLogService(), new MockContextKeyService()));
 
 		return service.executeCommand('farboo2').then(() => {
 			assert.deepStrictEqual(actualOrder, expectedOrder);
@@ -185,7 +186,7 @@ suite('CommandService', function () {
 				return true;
 			}
 		};
-		const service = store.add(new CommandService(new InstantiationService(), extensionService, new NullLogService()));
+		const service = store.add(new CommandService(new InstantiationService(), extensionService, new NullLogService(), new MockContextKeyService()));
 
 		await extensionService.whenInstalledExtensionsRegistered();
 
