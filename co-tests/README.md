@@ -4,8 +4,10 @@ Test hub com foco em baixa flakiness para as partes CO.
 
 ## Pre-requisitos
 
-- Node.js 22.x
-- Dependencias instaladas (`npm install`)
+- Node.js 22.x (`.nvmrc`)
+- Dependencias instaladas
+
+Use `npm ci` em CI ou quando quiser ambiente limpo/reprodutivel. Use `npm install` para desenvolvimento local iterativo.
 
 ## Comandos
 
@@ -15,13 +17,15 @@ npm run co:test:unit
 npm run co:test:ext
 ```
 
+`npm run co:test` executa unit + integration e falha com exit code != 0 se qualquer etapa falhar.
+
 ## Escopo
 
 - Unit tests (Node/Mocha):
   - `packages/co-template-core`
   - `extensions/co-diagramador`
   - `extensions/co-shell` (helpers puros)
-- Integration leve em host de extensao (sem UI):
+- Integration leve headless (sem UI/webview):
   - `extensions/co-shell`
   - `extensions/co-template-generator`
 
@@ -29,18 +33,19 @@ Todos os runs exportam `TECTONIC_PATH=__missing__` para evitar dependencia de Te
 
 ## Debug de falhas
 
-- Rode uma etapa por vez:
+- Rodar etapas separadas:
   - `bash co-tests/scripts/run-unit.sh`
   - `bash co-tests/scripts/run-ext.sh`
-- Integration de uma extensao:
-  - `npx mocha "extensions/co-shell/out/test/integration/**/*.test.js" --ui tdd`
+- Rodar suites especificas:
+  - `npx mocha "packages/co-template-core/out/test/**/*.test.js" --ui tdd --grep "buildPreview"`
+  - `npx mocha "extensions/co-shell/out/test/unit/**/*.test.js" --ui tdd --grep "admins"`
   - `npx mocha "extensions/co-template-generator/out/test/integration/**/*.test.js" --ui tdd`
 
-## Rodar suite especifica (Mocha)
-
-Exemplos:
+## Hook local opcional
 
 ```bash
-npx mocha "packages/co-template-core/out/test/**/*.test.js" --grep "buildPreview"
-npx mocha "extensions/co-shell/out/test/unit/**/*.test.js" --grep "admins"
+cp scripts/hooks/pre-commit.example .git/hooks/pre-commit
+chmod +x .git/hooks/pre-commit
 ```
+
+O exemplo roda `npm run co:test:unit` antes de permitir commit local.
