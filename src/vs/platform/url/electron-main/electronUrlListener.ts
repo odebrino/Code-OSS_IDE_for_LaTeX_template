@@ -3,7 +3,11 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { app, Event as ElectronEvent } from 'electron';
+import { createRequire } from 'node:module';
+const electronRuntime = createRequire(import.meta.url)('electron') as typeof import('electron');
+import type * as Electron from 'electron';
+const { app } = electronRuntime;
+type ElectronEvent = Electron.Event;
 import { disposableTimeout } from '../../../base/common/async.js';
 import { Event } from '../../../base/common/event.js';
 import { Disposable } from '../../../base/common/lifecycle.js';

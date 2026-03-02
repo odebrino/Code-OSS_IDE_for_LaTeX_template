@@ -3,7 +3,13 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { IpcMainEvent, Menu, MenuItem } from 'electron';
+import { createRequire } from 'node:module';
+const electronRuntime = createRequire(import.meta.url)('electron') as typeof import('electron');
+import type * as Electron from 'electron';
+const { Menu, MenuItem } = electronRuntime;
+type IpcMainEvent = Electron.IpcMainEvent;
+type Menu = Electron.Menu;
+type MenuItem = Electron.MenuItem;
 import { validatedIpcMain } from '../../ipc/electron-main/ipcMain.js';
 import { CONTEXT_MENU_CHANNEL, CONTEXT_MENU_CLOSE_CHANNEL, IPopupOptions, ISerializableContextMenuItem } from '../common/contextmenu.js';
 

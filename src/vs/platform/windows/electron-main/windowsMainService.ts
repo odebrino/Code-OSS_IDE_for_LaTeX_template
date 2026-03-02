@@ -4,7 +4,11 @@
  *--------------------------------------------------------------------------------------------*/
 
 import * as fs from 'fs';
-import { app, BrowserWindow, WebContents, shell } from 'electron';
+import { createRequire } from 'node:module';
+const electronRuntime = createRequire(import.meta.url)('electron') as typeof import('electron');
+import type * as Electron from 'electron';
+const { app, BrowserWindow, shell } = electronRuntime;
+type WebContents = Electron.WebContents;
 import { addUNCHostToAllowlist } from '../../../base/node/unc.js';
 import { hostname, release, arch } from 'os';
 import { coalesce, distinct } from '../../../base/common/arrays.js';

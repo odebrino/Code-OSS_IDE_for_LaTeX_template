@@ -3,7 +3,11 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { WebContentsView, webContents } from 'electron';
+import { createRequire } from 'node:module';
+const electronRuntime = createRequire(import.meta.url)('electron') as typeof import('electron');
+import type * as Electron from 'electron';
+const { WebContentsView, webContents } = electronRuntime;
+type WebContentsView = Electron.WebContentsView;
 import { FileAccess } from '../../../base/common/network.js';
 import { Disposable } from '../../../base/common/lifecycle.js';
 import { Emitter, Event } from '../../../base/common/event.js';

@@ -3,7 +3,13 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { BrowserWindow, Details, MessageChannelMain, app, utilityProcess, UtilityProcess as ElectronUtilityProcess } from 'electron';
+import { createRequire } from 'node:module';
+const electronRuntime = createRequire(import.meta.url)('electron') as typeof import('electron');
+import type * as Electron from 'electron';
+const { MessageChannelMain, app, utilityProcess } = electronRuntime;
+type BrowserWindow = Electron.BrowserWindow;
+type Details = Electron.Details;
+type ElectronUtilityProcess = Electron.UtilityProcess;
 import { Disposable } from '../../../base/common/lifecycle.js';
 import { Emitter, Event } from '../../../base/common/event.js';
 import { ILogService } from '../../log/common/log.js';

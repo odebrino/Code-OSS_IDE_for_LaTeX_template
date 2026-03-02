@@ -40,6 +40,7 @@ function code() {
 	export NODE_ENV=development
 	export VSCODE_DEV=1
 	export VSCODE_CLI=1
+	unset ELECTRON_RUN_AS_NODE
 	export ELECTRON_ENABLE_STACK_DUMPING=1
 	export ELECTRON_ENABLE_LOGGING=1
 	export COZITOS=0

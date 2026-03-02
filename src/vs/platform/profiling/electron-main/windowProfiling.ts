@@ -4,7 +4,8 @@
  *--------------------------------------------------------------------------------------------*/
 
 import type { ProfileResult } from 'v8-inspect-profiler';
-import { BrowserWindow } from 'electron';
+import type * as Electron from 'electron';
+type BrowserWindow = Electron.BrowserWindow;
 import { timeout } from '../../../base/common/async.js';
 import { ILogService } from '../../log/common/log.js';
 import { IV8Profile } from '../common/profiling.js';

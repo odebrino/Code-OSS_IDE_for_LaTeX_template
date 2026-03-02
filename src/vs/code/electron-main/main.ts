@@ -5,7 +5,9 @@
 
 import '../../platform/update/common/update.config.contribution.js';
 
-import { app, dialog } from 'electron';
+import { createRequire } from 'node:module';
+const electronRuntime = createRequire(import.meta.url)('electron') as typeof import('electron');
+const { app, dialog } = electronRuntime;
 import { unlinkSync, promises } from 'fs';
 import { URI } from '../../base/common/uri.js';
 import { coalesce, distinct } from '../../base/common/arrays.js';

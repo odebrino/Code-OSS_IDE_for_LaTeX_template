@@ -3,7 +3,12 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { app, BrowserWindow, Event as IpcEvent } from 'electron';
+import { createRequire } from 'node:module';
+const electronRuntime = createRequire(import.meta.url)('electron') as typeof import('electron');
+import type * as Electron from 'electron';
+const { app } = electronRuntime;
+type BrowserWindow = Electron.BrowserWindow;
+type IpcEvent = Electron.Event;
 import { validatedIpcMain } from '../../../base/parts/ipc/electron-main/ipcMain.js';
 import { CancellationToken } from '../../../base/common/cancellation.js';
 import { URI } from '../../../base/common/uri.js';

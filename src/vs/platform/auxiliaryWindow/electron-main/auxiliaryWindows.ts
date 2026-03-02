@@ -3,7 +3,10 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { BrowserWindowConstructorOptions, HandlerDetails, WebContents } from 'electron';
+import type * as Electron from 'electron';
+type BrowserWindowConstructorOptions = Electron.BrowserWindowConstructorOptions;
+type HandlerDetails = Electron.HandlerDetails;
+type WebContents = Electron.WebContents;
 import { Event } from '../../../base/common/event.js';
 import { IAuxiliaryWindow } from './auxiliaryWindow.js';
 import { createDecorator } from '../../instantiation/common/instantiation.js';

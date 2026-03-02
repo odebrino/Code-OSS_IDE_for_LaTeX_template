@@ -3,7 +3,8 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { WebContents } from 'electron';
+import type * as Electron from 'electron';
+type WebContents = Electron.WebContents;
 import { validatedIpcMain } from './ipcMain.js';
 import { VSBuffer } from '../../../common/buffer.js';
 import { Emitter, Event } from '../../../common/event.js';

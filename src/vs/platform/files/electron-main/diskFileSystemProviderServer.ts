@@ -3,7 +3,9 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
-import { shell } from 'electron';
+import { createRequire } from 'node:module';
+const electronRuntime = createRequire(import.meta.url)('electron') as typeof import('electron');
+const { shell } = electronRuntime;
 import { localize } from '../../../nls.js';
 import { isWindows } from '../../../base/common/platform.js';
 import { Emitter } from '../../../base/common/event.js';

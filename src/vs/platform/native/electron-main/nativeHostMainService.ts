@@ -5,7 +5,19 @@
 
 import * as fs from 'fs';
 import { exec } from 'child_process';
-import { app, BrowserWindow, clipboard, contentTracing, Display, Menu, MessageBoxOptions, MessageBoxReturnValue, Notification, OpenDevToolsOptions, OpenDialogOptions, OpenDialogReturnValue, powerMonitor, SaveDialogOptions, SaveDialogReturnValue, screen, shell, webContents } from 'electron';
+import { createRequire } from 'node:module';
+const electronRuntime = createRequire(import.meta.url)('electron') as typeof import('electron');
+import type * as Electron from 'electron';
+const { app, BrowserWindow, clipboard, contentTracing, Menu, Notification, powerMonitor, screen, shell, webContents } = electronRuntime;
+type BrowserWindow = Electron.BrowserWindow;
+type Display = Electron.Display;
+type MessageBoxOptions = Electron.MessageBoxOptions;
+type MessageBoxReturnValue = Electron.MessageBoxReturnValue;
+type OpenDevToolsOptions = Electron.OpenDevToolsOptions;
+type OpenDialogOptions = Electron.OpenDialogOptions;
+type OpenDialogReturnValue = Electron.OpenDialogReturnValue;
+type SaveDialogOptions = Electron.SaveDialogOptions;
+type SaveDialogReturnValue = Electron.SaveDialogReturnValue;
 import { arch, cpus, freemem, loadavg, platform, release, totalmem, type } from 'os';
 import { promisify } from 'util';
 import { memoize } from '../../../base/common/decorators.js';
