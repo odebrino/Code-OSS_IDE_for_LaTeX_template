@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "templateId": "oficio",
+  "data": {
+    "TaskLabel": "Oficio 01",
+    "TaskType": "pratica",
+    "destinatario": "Destinatario",
+    "assunto": "Assunto do oficio",
+    "texto": "Escreva o corpo do oficio aqui."
+  }
+}

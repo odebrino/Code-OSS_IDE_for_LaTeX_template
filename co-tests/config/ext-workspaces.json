@@ -1,4 +1,5 @@
 {
+  "co-diagramador": "co-tests/fixtures/workspace-diagramador",
   "co-shell": "co-tests/fixtures/workspace-shell",
   "co-template-generator": "co-tests/fixtures/workspace-template-generator"
 }

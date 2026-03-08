@@ -23,7 +23,8 @@
 	"main": "./out/extension.js",
 	"activationEvents": [
 		"onView:co.diagramador.blocksView",
-		"onCommand:co.diagramador.open"
+		"onCommand:co.diagramador.open",
+		"onCommand:co.diagramador.manageTemplates"
 	],
 	"capabilities": {
 		"virtualWorkspaces": true,
@@ -38,11 +39,13 @@
 	},
 	"contributes": {
 		"commands": [
-			{ "command": "co.diagramador.open", "title": "CO: Abrir Diagramador" }
+			{ "command": "co.diagramador.open", "title": "CO: Abrir Diagramador" },
+			{ "command": "co.diagramador.manageTemplates", "title": "CO: Gerenciar Templates" }
 		],
 		"menus": {
 			"commandPalette": [
-				{ "command": "co.diagramador.open" }
+				{ "command": "co.diagramador.open" },
+				{ "command": "co.diagramador.manageTemplates" }
 			]
 		},
 		"viewsContainers": {
@@ -54,7 +57,7 @@
 			"diagramador": [
 				{
 					"id": "co.diagramador.blocksView",
-					"name": "Template e Dados",
+					"name": "Tarefas",
 					"type": "webview"
 				}
 			]
@@ -66,6 +69,11 @@
 					"type": "boolean",
 					"default": true,
 					"description": "Usa compilacao rapida no Diagramador (menos reruns do Tectonic)."
+				},
+				"co.runtime.baseDir": {
+					"type": "string",
+					"default": "",
+					"description": "Diretorio base visivel para o runtime de compilacao/preview das extensoes CO."
 				},
 				"co.tectonic.bundlePath": {
 					"type": "string",

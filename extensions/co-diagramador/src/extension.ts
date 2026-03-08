@@ -18,6 +18,7 @@ import {
 	TemplatePackage,
 	TemplateStoragePaths,
 	TemplateSummary,
+	describeTemplateBuildFailure,
 	loadTemplate,
 	listTemplates,
 	resolveTemplateStoragePaths,
@@ -30,18 +31,44 @@ import {
 	parseProject,
 	serializeProject
 } from 'co-doc-core';
-import { LocalStorageProvider } from 'co-storage-core';
+import { CoRuntimeRelocationReason, LocalStorageProvider, pruneRuntimeChildren, resolveCoRuntimeDir } from 'co-storage-core';
 import {
 	createDefaultProject,
 	DEFAULT_TEMPLATE_ID,
+	DEFAULT_TASK_TYPE,
 	DiagramadorProject,
+	DiagramadorTaskType,
+	LEGACY_TEMPLATE_ID,
 	TEMPLATE_TEST_V0
 } from './diagramador';
-import { DiagramadorStatus, DiagramadorTaskSummary, DiagramadorViewProvider, registerDiagramadorView } from './webview';
-import { PdfPreviewManager } from 'co-preview-core';
+import { DiagramadorViewProvider, registerDiagramadorView } from './webview';
+import { DiagramadorHostUi, vscodeHostUi } from './hostUi';
+import {
+	DiagramadorConfirmRequestMessage,
+	DiagramadorBuildDetails,
+	DiagramadorHostMessage,
+	DiagramadorPreviewInfo,
+	DiagramadorRuntimeInfo,
+	DiagramadorState,
+	DiagramadorStatus,
+	DiagramadorTaskSummary,
+	DiagramadorTemplateSaveMessage,
+	DiagramadorWebviewMessage,
+	isDiagramadorWebviewMessage
+} from './protocol';
+import { PdfPreviewManager, PreviewOpenResult } from 'co-preview-core';
+import { createDiagramadorTestingHarness, DiagramadorTestApi } from './testing/harness';
+import {
+	DIAGRAMADOR_DEFAULT_CREATE_TEMPLATE_ID,
+	DIAGRAMADOR_MANAGED_TEMPLATES,
+	DIAGRAMADOR_TEMPLATE_OPTIONS
+} from './templateSeeds';
 
 export async function activate(context: vscode.ExtensionContext) {
-	const diagramadorController = new DiagramadorController(context);
+	const testingHarness = process.env.CO_TESTING === '1'
+		? createDiagramadorTestingHarness(context)
+		: undefined;
+	const diagramadorController = new DiagramadorController(context, testingHarness?.dependencies);
 	diagramadorController.log('activate: starting');
 	await diagramadorController.initialize();
 	const diagramadorProvider = registerDiagramadorView(
@@ -57,12 +84,24 @@ export async function activate(context: vscode.ExtensionContext) {
 		vscode.commands.registerCommand('co.diagramador.open', async () => {
 			diagramadorController.log('command: co.diagramador.open');
 			await diagramadorController?.open();
+		}),
+		vscode.commands.registerCommand('co.diagramador.manageTemplates', async () => {
+			diagramadorController.log('command: co.diagramador.manageTemplates');
+			await diagramadorController?.manageTemplates();
 		})
 	);
+
+	if (testingHarness) {
+		const api = testingHarness.createApi(diagramadorController);
+		return { __test: api satisfies DiagramadorTestApi };
+	}
+
+	return undefined;
 }
 
 type DiagramadorPaths = {
-	baseDir: string;
+	storageBaseDir: string;
+	runtimeBaseDir: string;
 	projectPath: string;
 	tasksDir: string;
 	outDir: string;
@@ -70,6 +109,56 @@ type DiagramadorPaths = {
 	previewTexPath: string;
 	previewPdfPath: string;
 	buildLogPath: string;
+};
+
+type DiagramadorBuildServiceLike = vscode.Disposable & {
+	schedule(request: {
+		template: TemplatePackage;
+		previewData: Record<string, any>;
+		outDir: string;
+		fast?: boolean;
+	}): void;
+};
+
+type DiagramadorPreviewManagerLike = vscode.Disposable & {
+	open(previewPdfPath: string): Promise<PreviewOpenResult>;
+	refresh(previewPdfPath: string): Promise<PreviewOpenResult>;
+	showStatus(status: {
+		state: 'idle' | 'waiting_for_build' | 'ready' | 'build_error' | 'preview_error' | 'unavailable';
+		message: string;
+		detail?: string;
+		title?: string;
+		path?: string;
+	}): Promise<PreviewOpenResult>;
+};
+
+type DiagramadorBuildServiceFactory = (
+	scope: 'document' | 'template',
+	options: {
+		debounceMs?: number;
+		onStatus?: (status: DiagramadorStatus) => void;
+		onComplete?: (result: TemplateBuildResult) => void;
+	}
+) => DiagramadorBuildServiceLike;
+
+type DiagramadorPreviewManagerFactory = (
+	scope: 'document' | 'template',
+	output: vscode.OutputChannel,
+	options: {
+		extensionRoot: string;
+		appName: string;
+		title: string;
+		viewType: string;
+	}
+) => DiagramadorPreviewManagerLike;
+
+type DiagramadorMessageTarget = Pick<vscode.Webview, 'postMessage'>;
+
+export type DiagramadorControllerDependencies = {
+	ui?: DiagramadorHostUi;
+	output?: vscode.OutputChannel;
+	createBuildService?: DiagramadorBuildServiceFactory;
+	createPreviewManager?: DiagramadorPreviewManagerFactory;
 };
 
 const FONT_BLOCK_PATTERN = /% ========= Fonte[\s\S]*?% ========= Variaveis =========/;
@@ -117,23 +206,54 @@ const DEFAULT_TEMPLATE_SOURCE = String.raw`\documentclass[12pt]{article}
 
 \end{document}`;
 
-class DiagramadorController implements vscode.Disposable {
+function createDefaultBuildService(
+	_scope: 'document' | 'template',
+	options: {
+		debounceMs?: number;
+		onStatus?: (status: DiagramadorStatus) => void;
+		onComplete?: (result: TemplateBuildResult) => void;
+	}
+): DiagramadorBuildServiceLike {
+	return new TemplateBuildService(options);
+}
+
+function createDefaultPreviewManager(
+	_scope: 'document' | 'template',
+	output: vscode.OutputChannel,
+	options: {
+		extensionRoot: string;
+		appName: string;
+		title: string;
+		viewType: string;
+	}
+): DiagramadorPreviewManagerLike {
+	return new PdfPreviewManager(output, options);
+}
+
+export class DiagramadorController implements vscode.Disposable {
 	private project: DiagramadorProject = createDefaultProject();
 	private status: DiagramadorStatus = { state: 'idle' };
 	private buildError?: string;
 	private buildLogPath?: string;
+	private buildOutDir?: string;
+	private buildDetails?: DiagramadorBuildDetails;
+	private previewInfo: DiagramadorPreviewInfo = { state: 'idle', message: 'Aguardando PDF.' };
 	private templateStatus: DiagramadorStatus = { state: 'idle' };
 	private templateError?: string;
 	private templateBuildError?: string;
 	private templateBuildLogPath?: string;
-	private readonly paths: DiagramadorPaths;
+	private templateBuildOutDir?: string;
+	private templateBuildDetails?: DiagramadorBuildDetails;
+	private templatePreviewInfo: DiagramadorPreviewInfo = { state: 'idle', message: 'Aguardando PDF do template.' };
+	private paths: DiagramadorPaths;
 	private readonly storage: LocalStorageProvider;
 	private viewProvider?: DiagramadorViewProvider;
-	private readonly buildService: TemplateBuildService;
-	private readonly templateBuildService: TemplateBuildService;
-	private readonly previewManager: PdfPreviewManager;
-	private readonly templatePreviewManager: PdfPreviewManager;
+	private readonly buildService: DiagramadorBuildServiceLike;
+	private readonly templateBuildService: DiagramadorBuildServiceLike;
+	private readonly previewManager: DiagramadorPreviewManagerLike;
+	private readonly templatePreviewManager: DiagramadorPreviewManagerLike;
 	private readonly output: vscode.OutputChannel;
+	private readonly ui: DiagramadorHostUi;
 	private readonly templateStorage: TemplateStoragePaths;
 	private readonly headerImagePath: string;
 	private readonly headerImageName = 'modelo_header_image1.jpg';
@@ -147,34 +267,49 @@ class DiagramadorController implements vscode.Disposable {
 	private readonly templateCache = new Map<string, TemplatePackage>();
 	private initialized = false;
 	private bundlePath?: string;
+	private viewMode: 'list' | 'task' = 'list';
 	private activeTab: 'document' | 'templates' = 'document';
+	private openDocumentPreviewOnNextSuccess = false;
+	private runtimeInfo: DiagramadorRuntimeInfo;
 
-	constructor(private readonly context: vscode.ExtensionContext) {
+	constructor(
+		private readonly context: vscode.ExtensionContext,
+		deps: DiagramadorControllerDependencies = {}
+	) {
 		const extensionRoot = context.extensionUri.fsPath;
 		const globalStoragePath = context.globalStorageUri.fsPath;
-		const baseDir = resolveDiagramadorBaseDir(context);
-		this.paths = resolveDiagramadorPaths(baseDir);
-		this.storage = new LocalStorageProvider(baseDir);
-		this.output = vscode.window.createOutputChannel('CO Diagramador');
+		const storageBaseDir = resolveDiagramadorStorageBaseDir(context);
+		const bootstrapRuntimeBaseDir = path.join(os.homedir(), 'CO-runtime', 'bootstrap', 'diagramador');
+		this.paths = resolveDiagramadorPaths(storageBaseDir, bootstrapRuntimeBaseDir);
+		this.storage = new LocalStorageProvider(storageBaseDir);
+		this.ui = deps.ui ?? vscodeHostUi;
+		this.output = deps.output ?? vscode.window.createOutputChannel('CO Diagramador');
 		this.headerImagePath = path.join(extensionRoot, 'resources', this.headerImageName);
 		this.templateStorage = resolveTemplateStoragePaths(globalStoragePath, path.resolve(extensionRoot, '..', '..'));
-		this.buildService = new TemplateBuildService({
+		this.runtimeInfo = {
+			baseDir: bootstrapRuntimeBaseDir,
+			outDir: path.join(bootstrapRuntimeBaseDir, OUT_DIR_NAME),
+			relocated: false
+		};
+		const createBuildService = deps.createBuildService ?? createDefaultBuildService;
+		const createPreviewManager = deps.createPreviewManager ?? createDefaultPreviewManager;
+		this.buildService = createBuildService('document', {
 			debounceMs: 900,
 			onStatus: status => this.handleStatus(status),
 			onComplete: result => this.handleBuildResult(result)
 		});
-		this.templateBuildService = new TemplateBuildService({
+		this.templateBuildService = createBuildService('template', {
 			debounceMs: 900,
 			onStatus: status => this.handleTemplateStatus(status),
 			onComplete: result => this.handleTemplateBuildResult(result)
 		});
-		this.previewManager = new PdfPreviewManager(this.output, {
+		this.previewManager = createPreviewManager('document', this.output, {
 			extensionRoot,
 			appName: vscode.env.appName,
 			title: 'Diagramador Preview',
 			viewType: 'co.diagramador.preview'
 		});
-		this.templatePreviewManager = new PdfPreviewManager(this.output, {
+		this.templatePreviewManager = createPreviewManager('template', this.output, {
 			extensionRoot,
 			appName: vscode.env.appName,
 			title: 'Template Preview',
@@ -183,11 +318,15 @@ class DiagramadorController implements vscode.Disposable {
 	}
 
 	async initialize() {
-		await ensureDiagramadorDirs(this.storage);
+		await this.resolveRuntimePaths();
+		await ensureDiagramadorDirs(this.storage, this.paths);
+		await this.cleanupRuntimeArtifacts();
 		await this.resolveBundlePath();
 		await this.migrateLegacyProject();
 		await this.refreshTasks();
+		this.viewMode = this.currentTaskId ? 'task' : 'list';
 		this.project = createDefaultProject();
+		await this.ensureSeedTemplates();
 		await this.ensureDefaultTemplate();
 		const selectionChanged = await this.refreshTemplates();
 		this.initialized = true;
@@ -195,7 +334,6 @@ class DiagramadorController implements vscode.Disposable {
 		if (selectionChanged && this.currentTaskId) {
 			await this.saveAndBuild();
 		}
-		await this.scheduleTemplateBuild();
 	}
 
 	setViewProvider(provider: DiagramadorViewProvider) {
@@ -205,17 +343,27 @@ class DiagramadorController implements vscode.Disposable {
 		}
 	}
 
-	getState() {
+	getState(): DiagramadorState {
+		const currentTaskMeta = this.getCurrentTaskMeta();
 		return {
 			templates: this.templates,
 			selectedTemplateId: this.project.templateId,
+			viewMode: this.viewMode,
 			schema: this.currentSchema,
 			data: this.project.data ?? {},
 			status: this.status,
 			buildError: this.buildError,
 			buildLogPath: this.buildLogPath,
+			buildOutDir: this.buildOutDir,
+			buildDetails: this.buildDetails,
+			preview: this.previewInfo,
 			tasks: this.tasks,
 			currentTaskId: this.currentTaskId,
+			currentTaskLabel: currentTaskMeta.label,
+			currentTaskType: currentTaskMeta.taskType,
+			currentTemplateId: currentTaskMeta.templateId,
+			currentTemplateName: currentTaskMeta.templateName,
+			runtimeInfo: this.runtimeInfo,
 			activeTab: this.activeTab,
 			templateEditor: {
 				selectedTemplateId: this.editorTemplate?.manifest.id ?? '',
@@ -232,6 +380,9 @@ class DiagramadorController implements vscode.Disposable {
 				error: this.templateError,
 				buildError: this.templateBuildError,
 				buildLogPath: this.templateBuildLogPath,
+				buildOutDir: this.templateBuildOutDir,
+				buildDetails: this.templateBuildDetails,
+				preview: this.templatePreviewInfo,
 				revision: this.editorRevision
 			}
 		};
@@ -242,49 +393,110 @@ class DiagramadorController implements vscode.Disposable {
 		await this.ensureInitialized();
 		await this.revealView();
 		await this.refreshTasks();
+		if (!this.currentTaskId) {
+			this.viewMode = 'list';
+		}
+		await this.openDocumentPreview();
+		this.viewProvider?.sendState(this.getState());
+	}
+
+	async manageTemplates() {
+		await this.ensureInitialized();
+		await this.refreshTemplates();
+		type TemplateAction = 'open-folder' | 'import' | 'export' | 'duplicate' | 'delete';
+		const actions: Array<vscode.QuickPickItem & { value: TemplateAction }> = [
+			{ label: 'Abrir pasta de templates', value: 'open-folder', description: 'Abre o diretorio compartilhado dos templates.' },
+			{ label: 'Importar ZIP', value: 'import', description: 'Importa um template ZIP para o storage compartilhado.' },
+			{ label: 'Exportar template', value: 'export', description: 'Exporta um template existente para ZIP.' },
+			{ label: 'Duplicar template', value: 'duplicate', description: 'Cria uma copia editavel de um template.' },
+			{ label: 'Excluir template', value: 'delete', description: 'Remove um template nao-readonly.' }
+		];
+		const actionPick = await this.ui.showQuickPick(actions, {
+			placeHolder: 'Escolha uma acao para gerenciar templates',
+			ignoreFocusOut: true
+		});
+		if (!actionPick) {
+			return;
+		}
+		if (actionPick.value === 'open-folder') {
+			await vscode.env.openExternal(vscode.Uri.file(this.templateStorage.primaryDir));
+			return;
+		}
+		if (actionPick.value === 'import') {
+			await this.importEditorTemplateZip();
+			return;
+		}
+		const pickableTemplates = this.templates.map(template => ({
+			label: template.name,
+			description: template.readOnly ? `${template.id} · somente leitura` : template.id,
+			value: template.id
+		}));
+		const templatePick = await this.ui.showQuickPick(pickableTemplates, {
+			placeHolder: 'Escolha o template',
+			ignoreFocusOut: true
+		});
+		if (!templatePick) {
+			return;
+		}
+		await this.selectEditorTemplate(templatePick.value, { silent: true, skipBuild: true });
+		switch (actionPick.value) {
+			case 'export':
+				await this.exportEditorTemplate();
+				return;
+			case 'duplicate':
+				await this.duplicateEditorTemplate();
+				return;
+			case 'delete':
+				await this.deleteEditorTemplate();
+				return;
+			default:
+				return;
+		}
 	}
 
 	onViewVisible() {
 		void this.refreshTemplates();
 		void this.refreshTasks();
-		void this.scheduleTemplateBuild();
+		void this.openDocumentPreview();
 	}
 
-	async handleMessage(message: any, webview?: vscode.Webview) {
+	async handleMessage(message: DiagramadorWebviewMessage | unknown, webview?: DiagramadorMessageTarget) {
+		if (!isDiagramadorWebviewMessage(message)) {
+			return;
+		}
 		try {
-			this.log(`webview message: ${String(message?.type ?? 'unknown')}`);
+			this.log(`webview message: ${message.type}`);
 			await this.ensureInitialized();
-			switch (message?.type) {
+			switch (message.type) {
 				case 'ready':
 					this.viewProvider?.sendState(this.getState());
 					return;
-				case 'co-diagramador:generate':
-					this.log('webview action: co-diagramador:generate');
-					webview?.postMessage({ type: 'co-diagramador:ack', ok: true, receivedType: 'co-diagramador:generate' });
-					return;
 				case 'setTab':
-					this.setActiveTab(message?.tab);
+					this.setActiveTab(message.tab);
 					return;
 				case 'openTask':
-					await this.openTask(message?.taskId);
+					await this.openTask(message.taskId);
 					return;
 				case 'createTask':
-					await this.createTask(typeof message?.templateId === 'string' ? message.templateId : undefined);
+					await this.createTask(message, webview);
+					return;
+				case 'backToList':
+					await this.backToList();
 					return;
 				case 'renameTask':
-					await this.renameTask(message?.taskId, message?.label);
+					await this.renameTask(message.taskId, message.label);
 					return;
 				case 'deleteTask':
-					await this.deleteTask(message?.taskId);
+					await this.deleteTask(message.taskId);
 					return;
 				case 'updateTemplate':
-					await this.updateTemplate(message?.templateId);
+					await this.updateTemplate(message.templateId);
 					return;
 				case 'updateField':
-					await this.updateField(message?.key, message?.value);
+					await this.updateField(message.key, message.value);
 					return;
 				case 'templateSelect':
-					await this.selectEditorTemplate(message?.templateId);
+					await this.selectEditorTemplate(message.templateId);
 					return;
 				case 'templateCreate':
 					await this.createEditorTemplate();
@@ -305,13 +517,22 @@ class DiagramadorController implements vscode.Disposable {
 					await this.saveEditorTemplateDraft(message);
 					return;
 				case 'templateAddAsset':
-					await this.addEditorAsset(message?.name, message?.contents);
+					await this.addEditorAsset(message.name, message.contents);
 					return;
 				case 'templateDeleteAsset':
-					await this.deleteEditorAsset(message?.name);
+					await this.deleteEditorAsset(message.name);
 					return;
 				case 'openBuildLog':
-					await this.openBuildLog(message?.scope);
+					await this.openBuildLog(message.scope);
+					return;
+				case 'openBuildFolder':
+					await this.openBuildFolder(message.scope);
+					return;
+				case 'retryBuild':
+					await this.retryBuild(message.scope);
+					return;
+				case 'confirmRequest':
+					await this.handleConfirmRequest(message, webview);
 					return;
 				default:
 					return;
@@ -319,7 +540,7 @@ class DiagramadorController implements vscode.Disposable {
 		} catch (err) {
 			const details = err instanceof Error ? err.message : String(err);
 			this.output.appendLine(`[${new Date().toISOString()}] Falha ao processar acao: ${details}`);
-			void vscode.window.showErrorMessage(`Falha ao processar acao: ${details}`);
+			void this.ui.showErrorMessage(`Falha ao processar acao: ${details}`);
 			this.viewProvider?.sendState(this.getState());
 		}
 	}
@@ -338,20 +559,97 @@ class DiagramadorController implements vscode.Disposable {
 		this.activeTab = tab;
 		this.viewProvider?.sendState(this.getState());
 		if (tab === 'document') {
-			void this.previewManager.open(this.paths.previewPdfPath);
+			void this.openDocumentPreview();
 		} else {
 			void this.openTemplatePreview();
 		}
 	}
 
-	private async openBuildLog(scope: unknown) {
+	private async handleConfirmRequest(message: DiagramadorConfirmRequestMessage, webview?: DiagramadorMessageTarget) {
+		if (!webview) {
+			return;
+		}
+		const confirmLabel = message.confirmLabel?.trim() || 'Continuar';
+		const cancelLabel = message.cancelLabel?.trim() || 'Cancelar';
+		const accepted = message.severity === 'info'
+			? (await this.ui.showInformationMessage(message.message, confirmLabel, cancelLabel)) === confirmLabel
+			: (await this.ui.showWarningMessage(message.message, {
+				modal: true,
+				detail: message.detail || message.title
+			}, confirmLabel, cancelLabel)) === confirmLabel;
+		const response: DiagramadorHostMessage = {
+			type: 'confirmResult',
+			requestId: message.requestId,
+			accepted
+		};
+		await webview.postMessage(response);
+	}
+
+	private async openBuildLog(scope: 'document' | 'template' | unknown) {
 		const target = scope === 'template' ? this.templateBuildLogPath : this.buildLogPath;
 		if (!target || !await fileExists(target)) {
-			await vscode.window.showWarningMessage('Log nao encontrado.');
+			await this.ui.showWarningMessage('Log nao encontrado.', undefined);
 			return;
 		}
 		const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(target));
 		await vscode.window.showTextDocument(doc, { preview: true, viewColumn: vscode.ViewColumn.Beside });
+	}
+
+	private async openBuildFolder(scope: 'document' | 'template' | unknown) {
+		const targetDir = scope === 'template'
+			? this.templateBuildOutDir ?? (this.editorTemplate ? path.join(this.paths.templatePreviewDir, this.editorTemplate.manifest.id) : undefined)
+			: this.buildOutDir ?? this.paths.outDir;
+		if (!targetDir || !await fileExists(targetDir)) {
+			await this.ui.showWarningMessage('Pasta de saida nao encontrada.', undefined);
+			return;
+		}
+		await vscode.env.openExternal(vscode.Uri.file(targetDir));
+	}
+
+	private async retryBuild(scope: 'document' | 'template' | unknown) {
+		if (scope === 'template') {
+			await this.scheduleTemplateBuild();
+			if (this.activeTab === 'templates') {
+				await this.openTemplatePreview();
+			}
+			return;
+		}
+		if (!this.currentTaskId) {
+			return;
+		}
+		await this.scheduleBuild();
+		if (this.activeTab === 'document') {
+			await this.openDocumentPreview();
+		}
+	}
+
+	private async resolveRuntimePaths() {
+		const runtimeResolution = await resolveCoRuntimeDir({
+			featureName: 'diagramador',
+			appName: vscode.env.appName,
+			configuredBaseDir: vscode.workspace.getConfiguration('co.runtime').get<string>('baseDir'),
+			envBaseDir: process.env.CO_RUNTIME_BASE_DIR,
+			isSnapTectonic: await isSnapTectonicCommand(),
+			platform: process.platform
+		});
+		this.paths = resolveDiagramadorPaths(this.paths.storageBaseDir, runtimeResolution.baseDir);
+		this.runtimeInfo = {
+			baseDir: runtimeResolution.baseDir,
+			outDir: this.paths.outDir,
+			relocated: runtimeResolution.relocated,
+			reason: formatRuntimeReason(runtimeResolution.reason),
+			requestedBaseDir: runtimeResolution.requestedRootDir
+		};
+		if (runtimeResolution.relocated) {
+			this.output.appendLine(`[${new Date().toISOString()}] Runtime realocado: ${runtimeResolution.requestedRootDir} -> ${runtimeResolution.baseDir}`);
+		}
+	}
+
+	private async cleanupRuntimeArtifacts() {
+		await fs.mkdir(this.paths.runtimeBaseDir, { recursive: true });
+		await fs.mkdir(this.paths.outDir, { recursive: true });
+		await fs.mkdir(this.paths.templatePreviewDir, { recursive: true });
+		await pruneRuntimeChildren(this.paths.templatePreviewDir, { maxAgeDays: 14, maxEntries: 50 });
 	}
 
 	private async ensureInitialized() {
@@ -374,7 +672,7 @@ class DiagramadorController implements vscode.Disposable {
 		this.viewProvider?.show(true);
 	}
 
-	private async updateTemplate(templateId: any) {
+	private async updateTemplate(templateId: string | undefined) {
 		const normalized = typeof templateId === 'string' && templateId.trim()
 			? templateId.trim()
 			: DEFAULT_TEMPLATE_ID;
@@ -401,7 +699,15 @@ class DiagramadorController implements vscode.Disposable {
 		}
 		const schemaEntry = this.currentSchema.find(entry => entry.key === key);
 		const nextData = { ...(this.project.data ?? {}) };
-		const normalizedValue = normalizeFieldValue(schemaEntry?.type, value);
+		let normalizedValue: string | number | boolean | string[] | undefined;
+		if (key === 'TaskLabel') {
+			const trimmed = String(value ?? '').trim();
+			normalizedValue = trimmed ? trimmed : undefined;
+		} else if (key === 'TaskType') {
+			normalizedValue = normalizeTaskType(value) ?? DEFAULT_TASK_TYPE;
+		} else {
+			normalizedValue = normalizeFieldValue(schemaEntry?.type, value);
+		}
 		if (normalizedValue === undefined) {
 			delete nextData[key];
 		} else {
@@ -415,10 +721,11 @@ class DiagramadorController implements vscode.Disposable {
 		if (!this.currentTaskId) {
 			return;
 		}
-		await ensureDiagramadorDirs(this.storage);
+		await ensureDiagramadorDirs(this.storage, this.paths);
 		const resolvedTemplate = template ?? await this.ensureTemplateReady(this.project.templateId);
 		await saveDiagramadorTask(this.storage, this.currentTaskId, this.project);
 		await this.refreshTasks();
+		this.buildOutDir = this.paths.outDir;
 		await this.scheduleBuild(resolvedTemplate);
 	}
 
@@ -431,6 +738,7 @@ class DiagramadorController implements vscode.Disposable {
 			this.handleStatus({ state: 'error', message: 'Template nao encontrado.' });
 			return;
 		}
+		this.buildOutDir = this.paths.outDir;
 		const fastBuild = this.getFastBuildSetting();
 		this.buildService.schedule({
 			template: resolvedTemplate,
@@ -444,7 +752,7 @@ class DiagramadorController implements vscode.Disposable {
 		return vscode.workspace.getConfiguration('co.diagramador').get<boolean>('fastBuild', true);
 	}
 
-	private async selectEditorTemplate(templateId: any, options?: { silent?: boolean; skipBuild?: boolean }) {
+	private async selectEditorTemplate(templateId: string | undefined, options?: { silent?: boolean; skipBuild?: boolean }) {
 		const normalized = typeof templateId === 'string' ? templateId.trim() : '';
 		if (!normalized) {
 			return;
@@ -519,7 +827,7 @@ class DiagramadorController implements vscode.Disposable {
 		}
 		const wasCurrentTemplate = current.manifest.id === this.project.templateId;
 		const previousTemplateId = this.project.templateId;
-		const confirmation = await vscode.window.showWarningMessage(
+		const confirmation = await this.ui.showWarningMessage(
 			wasCurrentTemplate
 				? `Excluir template "${current.manifest.name}"? Ele esta em uso no documento atual e sera substituido.`
 				: `Excluir template "${current.manifest.name}"?`,
@@ -541,7 +849,7 @@ class DiagramadorController implements vscode.Disposable {
 		if (templateChanged && wasCurrentTemplate) {
 			const nextTemplate = this.templates.find(template => template.id === this.project.templateId);
 			const nextName = nextTemplate?.name || this.project.templateId;
-			await vscode.window.showInformationMessage(`Template atual foi substituido por "${nextName}".`);
+			await this.ui.showInformationMessage(`Template atual foi substituido por "${nextName}".`);
 		}
 		await this.scheduleTemplateBuild();
 	}
@@ -550,7 +858,7 @@ class DiagramadorController implements vscode.Disposable {
 		if (!this.editorTemplate) {
 			return;
 		}
-		const target = await vscode.window.showSaveDialog({
+		const target = await this.ui.showSaveDialog({
 			filters: { 'Template Package': ['zip'] },
 			saveLabel: 'Exportar',
 			defaultUri: vscode.Uri.file(path.join(this.context.globalStorageUri.fsPath, `${this.editorTemplate.manifest.id}.zip`))
@@ -567,7 +875,7 @@ class DiagramadorController implements vscode.Disposable {
 	}
 
 	private async importEditorTemplateZip() {
-		const selection = await vscode.window.showOpenDialog({
+		const selection = await this.ui.showOpenDialog({
 			canSelectMany: false,
 			canSelectFiles: true,
 			canSelectFolders: false,
@@ -604,7 +912,7 @@ class DiagramadorController implements vscode.Disposable {
 			}
 			const targetDir = path.join(this.templateStorage.primaryDir, manifest.id);
 			if (await fileExists(targetDir)) {
-				const confirmation = await vscode.window.showWarningMessage(
+				const confirmation = await this.ui.showWarningMessage(
 					`Template "${manifest.id}" ja existe. Substituir?`,
 					{ modal: true },
 					'Substituir',
@@ -637,10 +945,7 @@ class DiagramadorController implements vscode.Disposable {
 		}
 	}
 
-	private async saveEditorTemplateDraft(message: any) {
-		if (!message || typeof message !== 'object') {
-			return;
-		}
+	private async saveEditorTemplateDraft(message: DiagramadorTemplateSaveMessage) {
 		const manifestText = typeof message.manifestText === 'string' ? message.manifestText : '';
 		const mainTex = typeof message.mainTex === 'string' ? message.mainTex : '';
 		const previewText = typeof message.previewText === 'string' ? message.previewText : '';
@@ -719,7 +1024,7 @@ class DiagramadorController implements vscode.Disposable {
 		}
 	}
 
-	private async addEditorAsset(name: any, contents: any) {
+	private async addEditorAsset(name: string | undefined, contents: string | undefined) {
 		const current = this.editorTemplate;
 		if (!current || current.readOnly) {
 			return;
@@ -737,7 +1042,7 @@ class DiagramadorController implements vscode.Disposable {
 		await this.scheduleTemplateBuild();
 	}
 
-	private async deleteEditorAsset(name: any) {
+	private async deleteEditorAsset(name: string | undefined) {
 		const current = this.editorTemplate;
 		if (!current || current.readOnly) {
 			return;
@@ -763,6 +1068,7 @@ class DiagramadorController implements vscode.Disposable {
 		}
 		const fastBuild = this.getFastBuildSetting();
 		const outDir = path.join(this.paths.templatePreviewDir, this.editorTemplate.manifest.id);
+		this.templateBuildOutDir = outDir;
 		this.templateBuildService.schedule({
 			template: this.editorTemplate,
 			previewData: this.editorTemplate.previewData ?? {},
@@ -773,10 +1079,14 @@ class DiagramadorController implements vscode.Disposable {
 
 	private async openTemplatePreview() {
 		if (!this.editorTemplate) {
+			this.templatePreviewInfo = { state: 'idle', message: 'Selecione um template para ver a preview.' };
+			this.viewProvider?.sendState(this.getState());
 			return;
 		}
 		const previewPath = path.join(this.paths.templatePreviewDir, this.editorTemplate.manifest.id, PREVIEW_PDF_NAME);
-		await this.templatePreviewManager.open(previewPath);
+		const result = await this.resolvePreviewForScope('template', previewPath);
+		this.templatePreviewInfo = toPreviewInfo(result, previewPath);
+		this.viewProvider?.sendState(this.getState());
 	}
 
 	private async refreshEditorAssets() {
@@ -814,13 +1124,14 @@ class DiagramadorController implements vscode.Disposable {
 	}
 
 	private async refreshTemplates(): Promise<boolean> {
+		await this.ensureSeedTemplates();
 		await this.ensureDefaultTemplate();
 		this.templates = await listTemplates(this.templateStorage);
 		const current = this.project.templateId;
 		if (this.templates.length === 0) {
 			this.project.templateId = DEFAULT_TEMPLATE_ID;
 		} else if (!this.templates.some(template => template.id === current)) {
-			this.project.templateId = this.templates[0].id;
+			this.project.templateId = this.templates.find(template => template.id === DEFAULT_TEMPLATE_ID)?.id ?? this.templates[0].id;
 		}
 		const changed = current !== this.project.templateId;
 		this.templateCache.clear();
@@ -843,7 +1154,14 @@ class DiagramadorController implements vscode.Disposable {
 		this.tasks = await listDiagramadorTasks(this.storage, this.paths);
 		if (this.currentTaskId && !this.tasks.some(task => task.id === this.currentTaskId)) {
 			this.currentTaskId = undefined;
+			this.viewMode = 'list';
 			this.project = createDefaultProject();
+			this.currentSchema = [];
+			this.buildError = undefined;
+			this.buildLogPath = undefined;
+			this.buildDetails = undefined;
+			this.buildOutDir = undefined;
+			this.previewInfo = { state: 'idle', message: 'Selecione ou crie uma tarefa.' };
 			this.viewProvider?.sendState(this.getState());
 		}
 		this.viewProvider?.sendState(this.getState());
@@ -860,8 +1178,12 @@ class DiagramadorController implements vscode.Disposable {
 		}
 		this.project = project;
 		this.currentTaskId = normalized;
+		this.viewMode = 'task';
 		this.buildError = undefined;
 		this.buildLogPath = undefined;
+		this.buildDetails = undefined;
+		this.buildOutDir = this.paths.outDir;
+		this.previewInfo = { state: 'waiting_for_build', message: 'Aguardando geracao do PDF.', path: this.paths.previewPdfPath };
 		const selectionChanged = await this.refreshTemplates();
 		this.viewProvider?.sendState(this.getState());
 		if (selectionChanged) {
@@ -869,63 +1191,145 @@ class DiagramadorController implements vscode.Disposable {
 			return;
 		}
 		await this.refreshTasks();
+		await this.openDocumentPreview();
 		await this.scheduleBuild();
 	}
 
-	private async createTask(templateId?: string) {
-		const selectedTemplateId = await this.pickTemplateForNewTask(templateId);
-		if (!selectedTemplateId) {
+	private async createTask(
+		message?: { label?: string; taskType?: string; templateId?: string },
+		webview?: vscode.Webview
+	) {
+		const request = await this.resolveCreateTaskRequest(message, webview);
+		if (!request) {
 			return;
 		}
 		const taskId = await createUniqueTaskId(this.storage);
 		this.project = createDefaultProject();
-		this.project.templateId = selectedTemplateId;
+		this.project.templateId = request.templateId;
+		this.project.data = {
+			...(this.project.data ?? {}),
+			TaskLabel: request.label,
+			TaskType: request.taskType
+		};
 		this.currentTaskId = taskId;
+		this.viewMode = 'task';
+		this.activeTab = 'document';
+		this.openDocumentPreviewOnNextSuccess = true;
 		this.buildError = undefined;
 		this.buildLogPath = undefined;
-		const template = await this.ensureTemplateReady(selectedTemplateId);
+		this.buildDetails = undefined;
+		this.buildOutDir = this.paths.outDir;
+		this.previewInfo = { state: 'waiting_for_build', message: 'Gerando PDF da nova tarefa...', path: this.paths.previewPdfPath };
+		const template = await this.ensureTemplateReady(request.templateId);
 		this.viewProvider?.sendState(this.getState());
+		await this.openDocumentPreview();
 		await this.saveAndBuild(template);
 	}
 
-	private async pickTemplateForNewTask(preferredId?: string): Promise<string | undefined> {
+	private async resolveCreateTaskRequest(
+		message: { label?: string; taskType?: string; templateId?: string } | undefined,
+		webview?: vscode.Webview
+	): Promise<{ label: string; taskType: DiagramadorTaskType; templateId: string } | undefined> {
+		await this.ensureSeedTemplates();
 		await this.refreshTemplates();
-		if (!this.templates.length) {
-			return this.project.templateId || DEFAULT_TEMPLATE_ID;
+		const normalized = {
+			label: typeof message?.label === 'string' ? message.label.trim() : '',
+			taskType: normalizeTaskType(message?.taskType) ?? DEFAULT_TASK_TYPE,
+			templateId: typeof message?.templateId === 'string' ? message.templateId.trim() : DIAGRAMADOR_DEFAULT_CREATE_TEMPLATE_ID
+		};
+		const availableTemplates = new Set(this.resolveCreateTaskTemplates().map(option => option.value));
+		const errors: {
+			label?: string;
+			taskType?: string;
+			templateId?: string;
+			general?: string;
+		} = {};
+		if (!normalized.label) {
+			errors.label = 'Informe um nome para a tarefa.';
 		}
-		if (this.templates.length === 1) {
-			return this.templates[0].id;
+		if (!isDiagramadorTaskType(normalized.taskType)) {
+			errors.taskType = 'Escolha um tipo valido.';
 		}
-		type TemplatePickItem = vscode.QuickPickItem & { id: string };
-		const normalizedPreferred = typeof preferredId === 'string' ? preferredId.trim() : '';
-		const fallbackId = this.templates.some(template => template.id === normalizedPreferred)
-			? normalizedPreferred
-			: this.templates.some(template => template.id === this.project.templateId)
-				? this.project.templateId
-				: undefined;
-		const items: TemplatePickItem[] = this.templates.map((template) => ({
-			id: template.id,
-			label: template.name || template.id,
-			description: template.version ? `v${template.version}` : '',
-			detail: template.description ? `${template.id} - ${template.description}` : template.id,
-			picked: template.id === fallbackId
-		}));
-		const picked = await vscode.window.showQuickPick(items, {
-			title: 'Escolha o template da tarefa',
-			placeHolder: 'Selecione um template',
-			matchOnDescription: true,
-			matchOnDetail: true
-		});
-		return picked?.id;
+		if (!availableTemplates.has(normalized.templateId)) {
+			errors.templateId = 'Escolha um template disponivel.';
+		}
+		if (Object.keys(errors).length > 0) {
+			if (webview) {
+				const response: DiagramadorHostMessage = {
+					type: 'createTaskValidation',
+					errors
+				};
+				await webview.postMessage(response);
+				return undefined;
+			}
+			await this.ui.showWarningMessage(errors.general ?? errors.label ?? errors.taskType ?? errors.templateId ?? 'Dados da tarefa invalidos.', undefined);
+			return undefined;
+		}
+		return {
+			label: normalized.label,
+			taskType: normalized.taskType,
+			templateId: normalized.templateId
+		};
 	}
 
-	private async renameTask(taskId: any, label: any) {
+	private resolveCreateTaskTemplates(): Array<vscode.QuickPickItem & { value: string }> {
+		const availableTemplateIds = new Set(this.templates.map(template => template.id));
+		return DIAGRAMADOR_TEMPLATE_OPTIONS
+			.filter(option => availableTemplateIds.has(option.id))
+			.sort((a, b) => {
+				if (a.id === DIAGRAMADOR_DEFAULT_CREATE_TEMPLATE_ID) {
+					return -1;
+				}
+				if (b.id === DIAGRAMADOR_DEFAULT_CREATE_TEMPLATE_ID) {
+					return 1;
+				}
+				return a.label.localeCompare(b.label);
+			})
+			.map(option => ({
+				label: option.label,
+				value: option.id,
+				description: option.description
+			}));
+	}
+
+	private async backToList(options?: { preserveTasks?: boolean }) {
+		const currentTemplateId = this.project.templateId || DEFAULT_TEMPLATE_ID;
+		this.currentTaskId = undefined;
+		this.viewMode = 'list';
+		this.project = createDefaultProject();
+		this.project.templateId = currentTemplateId;
+		this.currentSchema = [];
+		this.status = { state: 'idle' };
+		this.buildError = undefined;
+		this.buildLogPath = undefined;
+		this.buildDetails = undefined;
+		this.buildOutDir = undefined;
+		this.previewInfo = { state: 'idle', message: 'Selecione ou crie uma tarefa.' };
+		if (!options?.preserveTasks) {
+			await this.refreshTasks();
+		}
+		await this.openDocumentPreview();
+		this.viewProvider?.sendState(this.getState());
+	}
+
+	private getCurrentTaskMeta() {
+		const templateId = this.currentTaskId ? this.project.templateId : undefined;
+		const taskType = resolveTaskType(this.project);
+		return {
+			label: this.currentTaskId ? getTaskLabel(this.project, this.currentTaskId) : undefined,
+			taskType,
+			templateId,
+			templateName: templateId ? this.templates.find(template => template.id === templateId)?.name ?? templateId : undefined
+		};
+	}
+
+	private async renameTask(taskId: string | undefined, label: string | undefined) {
 		const normalized = normalizeTaskId(taskId);
 		if (!normalized) {
 			return;
 		}
 		const currentLabel = typeof label === 'string' ? label : '';
-		const input = await vscode.window.showInputBox({
+		const input = await this.ui.showInputBox({
 			prompt: 'Nome da tarefa',
 			value: currentLabel,
 			placeHolder: 'Ex: Tarefa 01'
@@ -955,13 +1359,13 @@ class DiagramadorController implements vscode.Disposable {
 		await this.refreshTasks();
 	}
 
-	private async deleteTask(taskId: any) {
+	private async deleteTask(taskId: string | undefined) {
 		const normalized = normalizeTaskId(taskId);
 		if (!normalized) {
 			return;
 		}
 		const taskLabel = this.tasks.find(task => task.id === normalized)?.label ?? normalized;
-		const confirmation = await vscode.window.showWarningMessage(
+		const confirmation = await this.ui.showWarningMessage(
 			this.currentTaskId === normalized
 				? `Excluir a tarefa atual (${taskLabel})?`
 				: `Excluir a tarefa "${taskLabel}"?`,
@@ -975,15 +1379,7 @@ class DiagramadorController implements vscode.Disposable {
 		const target = path.join(this.paths.tasksDir, `${normalized}.json`);
 		await fs.rm(target, { force: true });
 		if (this.currentTaskId === normalized) {
-			const previousTemplateId = this.project.templateId;
-			this.currentTaskId = undefined;
-			this.project = createDefaultProject();
-			this.project.templateId = previousTemplateId || this.project.templateId;
-			this.status = { state: 'idle' };
-			this.buildError = undefined;
-			this.buildLogPath = undefined;
-			await this.refreshTemplates();
-			this.viewProvider?.sendState(this.getState());
+			await this.backToList({ preserveTasks: true });
 		}
 		await this.refreshTasks();
 	}
@@ -1001,8 +1397,24 @@ class DiagramadorController implements vscode.Disposable {
 		await saveDiagramadorTask(this.storage, taskId, legacyProject);
 	}
 
+	private async ensureSeedTemplates() {
+		for (const seed of DIAGRAMADOR_MANAGED_TEMPLATES) {
+			try {
+				await saveTemplate(this.templateStorage, {
+					manifest: seed.manifest,
+					mainTex: seed.mainTex,
+					previewData: seed.previewData
+				});
+			} catch (err: any) {
+				const message = `Falha ao preparar template "${seed.manifest.id}": ${err?.message ?? err}`;
+				this.output.appendLine(`[${new Date().toISOString()}] ${message}`);
+				throw new Error(message);
+			}
+		}
+	}
+
 	private async ensureDefaultTemplate() {
-		const existing = await loadTemplate(this.templateStorage, DEFAULT_TEMPLATE_ID);
+		const existing = await loadTemplate(this.templateStorage, LEGACY_TEMPLATE_ID);
 		if (existing) {
 			await this.ensureHeaderImage(existing);
 			await this.ensureOptimizedFontBlock(existing);
@@ -1024,7 +1436,7 @@ class DiagramadorController implements vscode.Disposable {
 			Food: ''
 		};
 		const manifest: TemplateManifest = {
-			id: DEFAULT_TEMPLATE_ID,
+			id: LEGACY_TEMPLATE_ID,
 			name: 'Teste (v0)',
 			version: '0.0.1',
 			description: 'Template base do Diagramador',
@@ -1059,7 +1471,7 @@ class DiagramadorController implements vscode.Disposable {
 	}
 
 	private async ensureOptimizedFontBlock(template: TemplatePackage) {
-		if (template.readOnly || template.manifest.id !== DEFAULT_TEMPLATE_ID) {
+		if (template.readOnly || template.manifest.id !== LEGACY_TEMPLATE_ID) {
 			return;
 		}
 		if (!template.mainTex.includes('\\usepackage{fontspec}') && !template.mainTex.includes('Comic Sans MS')) {
@@ -1138,19 +1550,84 @@ class DiagramadorController implements vscode.Disposable {
 		return template;
 	}
 
-	private handleBuildResult(result: TemplateBuildResult) {
-		this.buildLogPath = result.logPath;
-		if (result.ok) {
-			this.buildError = undefined;
+	private async openDocumentPreview() {
+		if (!this.currentTaskId) {
+			this.previewInfo = { state: 'idle', message: 'Selecione ou crie uma tarefa.' };
+			await this.previewManager.showStatus({
+				state: 'idle',
+				title: 'Diagramador Preview',
+				message: 'Selecione ou crie uma tarefa.',
+				detail: 'Crie ou abra uma tarefa para gerar o PDF.'
+			});
+			this.viewProvider?.sendState(this.getState());
 			return;
 		}
-		this.buildError = result.friendly || 'Falha ao gerar o PDF.';
-		this.output.appendLine(`[${new Date().toISOString()}] ${result.friendly}`);
+		const result = await this.resolvePreviewForScope('document', this.paths.previewPdfPath);
+		this.previewInfo = toPreviewInfo(result, this.paths.previewPdfPath);
+		this.viewProvider?.sendState(this.getState());
+	}
+
+	private async resolvePreviewForScope(scope: 'document' | 'template', previewPath: string): Promise<PreviewOpenResult> {
+		const manager = scope === 'template' ? this.templatePreviewManager : this.previewManager;
+		const status = scope === 'template' ? this.templateStatus : this.status;
+		const buildError = scope === 'template' ? this.templateBuildError : this.buildError;
+		const buildDetails = scope === 'template' ? this.templateBuildDetails : this.buildDetails;
+		const title = scope === 'template' ? 'Template Preview' : 'Diagramador Preview';
+		if (status.state === 'building') {
+			return manager.showStatus({
+				state: 'waiting_for_build',
+				title,
+				message: 'Gerando PDF...',
+				detail: previewPath,
+				path: previewPath
+			});
+		}
+		if (buildError) {
+			return manager.showStatus({
+				state: 'build_error',
+				title,
+				message: buildError,
+				detail: [buildDetails?.detail, previewPath].filter(Boolean).join('\n\n'),
+				path: previewPath
+			});
+		}
+		return manager.open(previewPath);
+	}
+
+	private handleBuildResult(result: TemplateBuildResult) {
+		const description = describeTemplateBuildFailure(result);
+		this.buildLogPath = result.logPath;
+		this.buildOutDir = result.diagnostics?.outDir ?? this.paths.outDir;
+		this.buildDetails = {
+			failureCode: result.failureCode,
+			detail: description.detail,
+			technicalDetails: description.technicalDetails
+		};
+		if (result.ok) {
+			const shouldOpenPreview = this.activeTab === 'document' || this.openDocumentPreviewOnNextSuccess;
+			this.buildError = undefined;
+			this.openDocumentPreviewOnNextSuccess = false;
+			this.viewProvider?.sendState(this.getState());
+			if (shouldOpenPreview) {
+				void this.openDocumentPreview();
+			}
+			return;
+		}
+		this.buildError = description.summary;
+		this.output.appendLine(`[${new Date().toISOString()}] ${description.summary}`);
+		if (description.detail) {
+			this.output.appendLine(description.detail);
+		}
 		if (result.stdout) {
 			this.output.appendLine(result.stdout);
 		}
 		if (result.stderr) {
 			this.output.appendLine(result.stderr);
+		}
+		const shouldOpenPreview = this.activeTab === 'document' || this.openDocumentPreviewOnNextSuccess;
+		this.openDocumentPreviewOnNextSuccess = false;
+		if (shouldOpenPreview) {
+			void this.openDocumentPreview();
 		}
 		this.viewProvider?.sendState(this.getState());
 	}
@@ -1159,26 +1636,53 @@ class DiagramadorController implements vscode.Disposable {
 		this.status = status;
 		if (status.state === 'building') {
 			this.buildError = undefined;
+			this.buildDetails = undefined;
 		}
 		this.viewProvider?.sendState(this.getState());
-		if (status.state === 'success' && this.activeTab === 'document') {
-			void this.previewManager.refresh(this.paths.previewPdfPath);
+		if (status.state === 'success') {
+			return;
+		}
+		if (status.state === 'building' && (this.activeTab === 'document' || this.openDocumentPreviewOnNextSuccess)) {
+			void this.openDocumentPreview();
+		}
+		if (status.state === 'error') {
+			this.openDocumentPreviewOnNextSuccess = false;
+			if (this.activeTab === 'document') {
+				void this.openDocumentPreview();
+			}
 		}
 	}
 
 	private handleTemplateBuildResult(result: TemplateBuildResult) {
+		const description = describeTemplateBuildFailure(result);
 		this.templateBuildLogPath = result.logPath;
+		this.templateBuildOutDir = result.diagnostics?.outDir ?? this.templateBuildOutDir;
+		this.templateBuildDetails = {
+			failureCode: result.failureCode,
+			detail: description.detail,
+			technicalDetails: description.technicalDetails
+		};
 		if (result.ok) {
 			this.templateBuildError = undefined;
+			this.viewProvider?.sendState(this.getState());
+			if (this.activeTab === 'templates') {
+				void this.openTemplatePreview();
+			}
 			return;
 		}
-		this.templateBuildError = result.friendly || 'Falha ao gerar o PDF.';
-		this.output.appendLine(`[${new Date().toISOString()}] ${result.friendly}`);
+		this.templateBuildError = description.summary;
+		this.output.appendLine(`[${new Date().toISOString()}] ${description.summary}`);
+		if (description.detail) {
+			this.output.appendLine(description.detail);
+		}
 		if (result.stdout) {
 			this.output.appendLine(result.stdout);
 		}
 		if (result.stderr) {
 			this.output.appendLine(result.stderr);
+		}
+		if (this.activeTab === 'templates') {
+			void this.openTemplatePreview();
 		}
 		this.viewProvider?.sendState(this.getState());
 	}
@@ -1187,9 +1691,10 @@ class DiagramadorController implements vscode.Disposable {
 		this.templateStatus = status;
 		if (status.state === 'building') {
 			this.templateBuildError = undefined;
+			this.templateBuildDetails = undefined;
 		}
 		this.viewProvider?.sendState(this.getState());
-		if (status.state === 'success' && this.activeTab === 'templates') {
+		if ((status.state === 'building' || status.state === 'error') && this.activeTab === 'templates') {
 			void this.openTemplatePreview();
 		}
 	}
@@ -1203,7 +1708,18 @@ class DiagramadorController implements vscode.Disposable {
 	}
 }
 
-function resolveDiagramadorBaseDir(context: vscode.ExtensionContext): string {
+function toPreviewInfo(result: PreviewOpenResult, previewPath: string): DiagramadorPreviewInfo {
+	return {
+		state: result.state,
+		modeUsed: result.modeUsed,
+		reasonCode: result.reasonCode,
+		message: result.message,
+		details: result.details,
+		path: previewPath
+	};
+}
+
+function resolveDiagramadorStorageBaseDir(context: vscode.ExtensionContext): string {
 	const override = (process.env.CO_SAVE_DIR ?? '').trim();
 	if (override) {
 		return override;
@@ -1215,24 +1731,25 @@ function resolveDiagramadorBaseDir(context: vscode.ExtensionContext): string {
 	return path.join(context.globalStorageUri.fsPath, 'diagramador');
 }
 
-function resolveDiagramadorPaths(baseDir: string): DiagramadorPaths {
+function resolveDiagramadorPaths(storageBaseDir: string, runtimeBaseDir: string): DiagramadorPaths {
 	return {
-		baseDir,
-		projectPath: path.join(baseDir, PROJECT_FILE_NAME),
-		tasksDir: path.join(baseDir, TASKS_DIR_NAME),
-		outDir: path.join(baseDir, OUT_DIR_NAME),
-		templatePreviewDir: path.join(baseDir, TEMPLATE_PREVIEW_DIR_NAME),
-		previewTexPath: path.join(baseDir, OUT_DIR_NAME, PREVIEW_TEX_NAME),
-		previewPdfPath: path.join(baseDir, OUT_DIR_NAME, PREVIEW_PDF_NAME),
-		buildLogPath: path.join(baseDir, OUT_DIR_NAME, BUILD_LOG_NAME)
+		storageBaseDir,
+		runtimeBaseDir,
+		projectPath: path.join(storageBaseDir, PROJECT_FILE_NAME),
+		tasksDir: path.join(storageBaseDir, TASKS_DIR_NAME),
+		outDir: path.join(runtimeBaseDir, OUT_DIR_NAME),
+		templatePreviewDir: path.join(runtimeBaseDir, TEMPLATE_PREVIEW_DIR_NAME),
+		previewTexPath: path.join(runtimeBaseDir, OUT_DIR_NAME, PREVIEW_TEX_NAME),
+		previewPdfPath: path.join(runtimeBaseDir, OUT_DIR_NAME, PREVIEW_PDF_NAME),
+		buildLogPath: path.join(runtimeBaseDir, OUT_DIR_NAME, BUILD_LOG_NAME)
 	};
 }
 
-async function ensureDiagramadorDirs(storage: LocalStorageProvider) {
+async function ensureDiagramadorDirs(storage: LocalStorageProvider, paths: DiagramadorPaths) {
 	await storage.ensureDir('');
 	await storage.ensureDir(TASKS_DIR_NAME);
-	await storage.ensureDir(OUT_DIR_NAME);
-	await storage.ensureDir(TEMPLATE_PREVIEW_DIR_NAME);
+	await fs.mkdir(paths.outDir, { recursive: true });
+	await fs.mkdir(paths.templatePreviewDir, { recursive: true });
 }
 
 async function readProjectFromStorage(storage: LocalStorageProvider, relativePath: string): Promise<DiagramadorProject | null> {
@@ -1292,7 +1809,13 @@ async function listDiagramadorTasks(storage: LocalStorageProvider, paths: Diagra
 			}
 			const project = await readProjectFromStorage(storage, path.join(TASKS_DIR_NAME, entry));
 			const label = getTaskLabel(project, id);
-			tasks.push({ id, label, updatedAt });
+			tasks.push({
+				id,
+				label,
+				updatedAt,
+				taskType: resolveTaskType(project ?? undefined),
+				templateId: project?.templateId
+			});
 		}
 		tasks.sort((a, b) => b.updatedAt - a.updatedAt);
 		return tasks;
@@ -1367,6 +1890,68 @@ function normalizeTaskLabel(value: string | null | undefined): string {
 		return '';
 	}
 	return String(value).trim();
+}
+
+function normalizeTaskType(value: unknown): DiagramadorTaskType | undefined {
+	if (typeof value !== 'string') {
+		return undefined;
+	}
+	switch (value.trim().toLowerCase()) {
+		case 'teorica':
+			return 'teorica';
+		case 'pratica':
+			return 'pratica';
+		case 'salinha':
+			return 'salinha';
+		default:
+			return undefined;
+	}
+}
+
+function isDiagramadorTaskType(value: unknown): value is DiagramadorTaskType {
+	return normalizeTaskType(value) !== undefined;
+}
+
+async function isSnapTectonicCommand(): Promise<boolean> {
+	const configured = (process.env.TECTONIC_PATH ?? '').trim();
+	if (configured.includes('/snap/')) {
+		return true;
+	}
+	const resolved = await resolveExecutableOnPath('tectonic');
+	return resolved.includes('/snap/');
+}
+
+async function resolveExecutableOnPath(binaryName: string): Promise<string> {
+	if (path.isAbsolute(binaryName)) {
+		return binaryName;
+	}
+	const searchPath = process.env.PATH ?? '';
+	for (const segment of searchPath.split(path.delimiter)) {
+		const candidate = path.join(segment, binaryName);
+		try {
+			await fs.access(candidate, fsSync.constants.X_OK);
+			return candidate;
+		} catch {
+			// keep scanning
+		}
+	}
+	return binaryName;
+}
+
+function formatRuntimeReason(reason: CoRuntimeRelocationReason | undefined): string | undefined {
+	switch (reason) {
+		case 'hidden_path_under_snap':
+			return 'Runtime realocado para evitar compilacao em diretorio oculto com o Tectonic Snap.';
+		case 'tmp_path_under_snap':
+			return 'Runtime realocado para evitar compilacao em diretorio temporario com o Tectonic Snap.';
+		default:
+			return undefined;
+	}
+}
+
+function resolveTaskType(project: DiagramadorProject | undefined): DiagramadorTaskType {
+	const data = isPlainObject(project?.data) ? project.data : {};
+	return normalizeTaskType(pickDataValue(data, ['TaskType', 'taskType', 'type', 'Type'])) ?? DEFAULT_TASK_TYPE;
 }
 
 function pickDataValue(data: Record<string, any>, keys: string[]): string | undefined {

@@ -5,7 +5,7 @@
 
 import * as assert from 'assert';
 import { migrateLegacyProject, parseProject, serializeProject } from 'co-doc-core';
-import { createDefaultProject } from '../diagramador';
+import { createDefaultProject } from '../../diagramador';
 
 declare const suite: (name: string, fn: () => void) => void;
 declare const test: (name: string, fn: () => void) => void;
@@ -19,7 +19,7 @@ suite('Diagramador', () => {
 		assert.ok(parsed);
 		assert.strictEqual(parsed?.data.title, 'Ana');
 		assert.strictEqual(parsed?.data.members.length, 2);
-		assert.strictEqual(parsed?.templateId, 'test_v0');
+		assert.strictEqual(parsed?.templateId, 'tarefa');
 	});
 
 	test('migrateLegacyProject converte doc legado', () => {

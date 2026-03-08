@@ -7,7 +7,11 @@ import type { CoProjectV1 } from 'co-doc-core';
 
 export type DiagramadorProject = CoProjectV1;
 
-export const DEFAULT_TEMPLATE_ID = 'test_v0';
+export type DiagramadorTaskType = 'teorica' | 'pratica' | 'salinha';
+
+export const DEFAULT_TEMPLATE_ID = 'tarefa';
+export const LEGACY_TEMPLATE_ID = 'test_v0';
+export const DEFAULT_TASK_TYPE: DiagramadorTaskType = 'teorica';
 
 export const TEMPLATE_TEST_V0 = String.raw`\documentclass[12pt]{article}
 
