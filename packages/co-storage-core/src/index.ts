@@ -3,6 +3,7 @@
  *  Licensed under the MIT License. See License.txt in the project root for license information.
  *--------------------------------------------------------------------------------------------*/
 
+import { constants as fsConstants } from 'fs';
 import fs from 'fs/promises';
 import os from 'os';
 import path from 'path';
@@ -115,6 +116,43 @@ export class LocalStorageProvider implements StorageProvider {
 
 export type CoRuntimeRelocationReason = 'hidden_path_under_snap' | 'tmp_path_under_snap';
 
+export type CoFeature = 'diagramador' | 'correcao' | 'data-set';
+
+export type CoPersistentSource = 'override' | 'workspace' | 'global';
+
+export type CoPersistentPaths = {
+	feature: CoFeature;
+	baseDir: string;
+	requestedBaseDir: string;
+	source: CoPersistentSource;
+	workspaceDir?: string;
+	globalStorageDir: string;
+};
+
+export type CoRuntimePaths = CoRuntimeResolution & {
+	feature: CoFeature;
+	requestedBaseDir: string;
+};
+
+export type ResolveCoPathsOptions = {
+	feature: CoFeature;
+	appName: string;
+	globalStoragePath: string;
+	workspaceDir?: string;
+	saveDirOverride?: string;
+	configuredRuntimeBaseDir?: string;
+	envRuntimeBaseDir?: string;
+	homeDir?: string;
+	platform?: NodeJS.Platform;
+	isSnapTectonic?: boolean;
+};
+
+export type CoPathResolution = {
+	feature: CoFeature;
+	persistent: CoPersistentPaths;
+	runtime: CoRuntimePaths;
+};
+
 export type CoRuntimeResolution = {
 	baseDir: string;
 	rootDir: string;
@@ -122,6 +160,79 @@ export type CoRuntimeResolution = {
 	relocated: boolean;
 	reason?: CoRuntimeRelocationReason;
 };
+
+export function resolveCoPersistentPaths(options: {
+	feature: CoFeature;
+	globalStoragePath: string;
+	workspaceDir?: string;
+	saveDirOverride?: string;
+}): CoPersistentPaths {
+	const config = getFeatureStorageConfig(options.feature);
+	const globalStorageRoot = path.dirname(path.resolve(options.globalStoragePath));
+	const globalStorageDir = path.join(globalStorageRoot, config.globalStorageSegment);
+	const override = options.feature === 'diagramador'
+		? normalizeRuntimeRoot(options.saveDirOverride)
+		: undefined;
+	if (override) {
+		return {
+			feature: options.feature,
+			baseDir: override,
+			requestedBaseDir: override,
+			source: 'override',
+			globalStorageDir
+		};
+	}
+	const workspaceDir = normalizeRuntimeRoot(options.workspaceDir);
+	if (workspaceDir) {
+		return {
+			feature: options.feature,
+			baseDir: path.join(workspaceDir, ...config.workspaceSegments),
+			requestedBaseDir: path.join(workspaceDir, ...config.workspaceSegments),
+			source: 'workspace',
+			workspaceDir,
+			globalStorageDir
+		};
+	}
+	const baseDir = path.join(globalStorageDir, config.persistentDirName);
+	return {
+		feature: options.feature,
+		baseDir,
+		requestedBaseDir: baseDir,
+		source: 'global',
+		globalStorageDir
+	};
+}
+
+export async function resolveCoPaths(options: ResolveCoPathsOptions): Promise<CoPathResolution> {
+	const persistent = resolveCoPersistentPaths({
+		feature: options.feature,
+		globalStoragePath: options.globalStoragePath,
+		workspaceDir: options.workspaceDir,
+		saveDirOverride: options.saveDirOverride
+	});
+	const runtimeResolution = await resolveCoRuntimeDir({
+		featureName: options.feature,
+		appName: options.appName,
+		configuredBaseDir: options.configuredRuntimeBaseDir,
+		envBaseDir: options.envRuntimeBaseDir,
+		homeDir: options.homeDir,
+		platform: options.platform,
+		isSnapTectonic: options.isSnapTectonic
+	});
+	return {
+		feature: options.feature,
+		persistent,
+		runtime: {
+			feature: options.feature,
+			baseDir: runtimeResolution.baseDir,
+			rootDir: runtimeResolution.rootDir,
+			requestedRootDir: runtimeResolution.requestedRootDir,
+			requestedBaseDir: runtimeResolution.requestedRootDir,
+			relocated: runtimeResolution.relocated,
+			reason: runtimeResolution.reason
+		}
+	};
+}
 
 export async function resolveCoRuntimeDir(options: {
 	featureName: string;
@@ -203,12 +314,67 @@ export async function pruneRuntimeChildren(baseDir: string, options?: {
 	}
 }
 
+export async function resolveExecutableOnPath(binaryName: string, envPath = process.env.PATH ?? ''): Promise<string | undefined> {
+	const candidates = envPath.split(path.delimiter).filter(Boolean);
+	const suffixes = process.platform === 'win32'
+		? ['', '.exe', '.cmd', '.bat']
+		: [''];
+	for (const dir of candidates) {
+		for (const suffix of suffixes) {
+			const target = path.join(dir, `${binaryName}${suffix}`);
+			try {
+				await fs.access(target, fsConstants.X_OK);
+				return target;
+			} catch {
+				// keep looking
+			}
+		}
+	}
+	return undefined;
+}
+
+export async function isExecutableCommandSnap(binaryName: string, envPath = process.env.PATH ?? ''): Promise<boolean> {
+	const resolved = await resolveExecutableOnPath(binaryName, envPath);
+	if (!resolved) {
+		return false;
+	}
+	const normalized = resolved.replace(/\\/g, '/');
+	return normalized.startsWith('/snap/') || normalized.startsWith('/var/lib/snapd/snap/bin/') || normalized.includes('/snap/bin/');
+}
+
 function normalizeRuntimeRoot(value: string | undefined): string | undefined {
 	const trimmed = value?.trim();
 	if (!trimmed) {
 		return undefined;
 	}
 	return path.resolve(trimmed);
+}
+
+function getFeatureStorageConfig(feature: CoFeature): {
+	globalStorageSegment: string;
+	persistentDirName: string;
+	workspaceSegments: string[];
+} {
+	switch (feature) {
+		case 'diagramador':
+			return {
+				globalStorageSegment: 'odebrino.co-diagramador',
+				persistentDirName: 'diagramador',
+				workspaceSegments: ['.co', 'diagramador']
+			};
+		case 'correcao':
+			return {
+				globalStorageSegment: 'odebrino.co-correcao',
+				persistentDirName: 'corrections',
+				workspaceSegments: ['.co', 'corrections']
+			};
+		case 'data-set':
+			return {
+				globalStorageSegment: 'odebrino.co-data-set',
+				persistentDirName: 'data-set',
+				workspaceSegments: ['.co', 'data-set']
+			};
+	}
 }
 
 function sanitizeRuntimeProfile(appName: string): string {

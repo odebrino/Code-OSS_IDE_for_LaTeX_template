@@ -20,7 +20,7 @@ import {
 	TemplateSummary,
 	describeTemplateBuildFailure,
 	loadTemplate,
-	listTemplates,
+	scanTemplateStorage,
 	resolveTemplateStoragePaths,
 	resolveTectonicBundlePath,
 	saveTemplate,
@@ -31,7 +31,14 @@ import {
 	parseProject,
 	serializeProject
 } from 'co-doc-core';
-import { CoRuntimeRelocationReason, LocalStorageProvider, pruneRuntimeChildren, resolveCoRuntimeDir } from 'co-storage-core';
+import {
+	CoRuntimeRelocationReason,
+	LocalStorageProvider,
+	isExecutableCommandSnap,
+	pruneRuntimeChildren,
+	resolveCoPaths,
+	resolveCoPersistentPaths
+} from 'co-storage-core';
 import {
 	createDefaultProject,
 	DEFAULT_TEMPLATE_ID,
@@ -278,7 +285,13 @@ export class DiagramadorController implements vscode.Disposable {
 	) {
 		const extensionRoot = context.extensionUri.fsPath;
 		const globalStoragePath = context.globalStorageUri.fsPath;
-		const storageBaseDir = resolveDiagramadorStorageBaseDir(context);
+		const persistentPaths = resolveCoPersistentPaths({
+			feature: 'diagramador',
+			globalStoragePath,
+			workspaceDir: vscode.workspace.workspaceFolders?.[0]?.uri.fsPath,
+			saveDirOverride: process.env.CO_SAVE_DIR
+		});
+		const storageBaseDir = persistentPaths.baseDir;
 		const bootstrapRuntimeBaseDir = path.join(os.homedir(), 'CO-runtime', 'bootstrap', 'diagramador');
 		this.paths = resolveDiagramadorPaths(storageBaseDir, bootstrapRuntimeBaseDir);
 		this.storage = new LocalStorageProvider(storageBaseDir);
@@ -624,24 +637,27 @@ export class DiagramadorController implements vscode.Disposable {
 	}
 
 	private async resolveRuntimePaths() {
-		const runtimeResolution = await resolveCoRuntimeDir({
-			featureName: 'diagramador',
+		const resolution = await resolveCoPaths({
+			feature: 'diagramador',
 			appName: vscode.env.appName,
-			configuredBaseDir: vscode.workspace.getConfiguration('co.runtime').get<string>('baseDir'),
-			envBaseDir: process.env.CO_RUNTIME_BASE_DIR,
+			globalStoragePath: this.context.globalStorageUri.fsPath,
+			workspaceDir: vscode.workspace.workspaceFolders?.[0]?.uri.fsPath,
+			saveDirOverride: process.env.CO_SAVE_DIR,
+			configuredRuntimeBaseDir: vscode.workspace.getConfiguration('co.runtime').get<string>('baseDir'),
+			envRuntimeBaseDir: process.env.CO_RUNTIME_BASE_DIR,
 			isSnapTectonic: await isSnapTectonicCommand(),
 			platform: process.platform
 		});
-		this.paths = resolveDiagramadorPaths(this.paths.storageBaseDir, runtimeResolution.baseDir);
+		this.paths = resolveDiagramadorPaths(resolution.persistent.baseDir, resolution.runtime.baseDir);
 		this.runtimeInfo = {
-			baseDir: runtimeResolution.baseDir,
+			baseDir: resolution.runtime.baseDir,
 			outDir: this.paths.outDir,
-			relocated: runtimeResolution.relocated,
-			reason: formatRuntimeReason(runtimeResolution.reason),
-			requestedBaseDir: runtimeResolution.requestedRootDir
+			relocated: resolution.runtime.relocated,
+			reason: formatRuntimeReason(resolution.runtime.reason),
+			requestedBaseDir: resolution.runtime.requestedBaseDir
 		};
-		if (runtimeResolution.relocated) {
-			this.output.appendLine(`[${new Date().toISOString()}] Runtime realocado: ${runtimeResolution.requestedRootDir} -> ${runtimeResolution.baseDir}`);
+		if (resolution.runtime.relocated) {
+			this.output.appendLine(`[${new Date().toISOString()}] Runtime realocado: ${resolution.runtime.requestedBaseDir} -> ${resolution.runtime.baseDir}`);
 		}
 	}
 
@@ -1126,7 +1142,9 @@ export class DiagramadorController implements vscode.Disposable {
 	private async refreshTemplates(): Promise<boolean> {
 		await this.ensureSeedTemplates();
 		await this.ensureDefaultTemplate();
-		this.templates = await listTemplates(this.templateStorage);
+		const scan = await scanTemplateStorage(this.templateStorage);
+		this.templates = scan.templates;
+		this.logTemplateScanIssues(scan.issues);
 		const current = this.project.templateId;
 		if (this.templates.length === 0) {
 			this.project.templateId = DEFAULT_TEMPLATE_ID;
@@ -1148,6 +1166,15 @@ export class DiagramadorController implements vscode.Disposable {
 		}
 		this.viewProvider?.sendState(this.getState());
 		return changed;
+	}
+
+	private logTemplateScanIssues(issues: Array<{ id: string; code: string; message: string; path: string }>) {
+		if (!issues.length) {
+			return;
+		}
+		for (const issue of issues) {
+			this.output.appendLine(`[${new Date().toISOString()}] Template com problema (${issue.id} / ${issue.code}): ${issue.message} [${issue.path}]`);
+		}
 	}
 
 	private async refreshTasks() {
@@ -1719,18 +1746,6 @@ function toPreviewInfo(result: PreviewOpenResult, previewPath: string): Diagrama
 	};
 }
 
-function resolveDiagramadorStorageBaseDir(context: vscode.ExtensionContext): string {
-	const override = (process.env.CO_SAVE_DIR ?? '').trim();
-	if (override) {
-		return override;
-	}
-	const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
-	if (workspaceFolder) {
-		return path.join(workspaceFolder.uri.fsPath, '.co', 'diagramador');
-	}
-	return path.join(context.globalStorageUri.fsPath, 'diagramador');
-}
-
 function resolveDiagramadorPaths(storageBaseDir: string, runtimeBaseDir: string): DiagramadorPaths {
 	return {
 		storageBaseDir,
@@ -1917,25 +1932,7 @@ async function isSnapTectonicCommand(): Promise<boolean> {
 	if (configured.includes('/snap/')) {
 		return true;
 	}
-	const resolved = await resolveExecutableOnPath('tectonic');
-	return resolved.includes('/snap/');
-}
-
-async function resolveExecutableOnPath(binaryName: string): Promise<string> {
-	if (path.isAbsolute(binaryName)) {
-		return binaryName;
-	}
-	const searchPath = process.env.PATH ?? '';
-	for (const segment of searchPath.split(path.delimiter)) {
-		const candidate = path.join(segment, binaryName);
-		try {
-			await fs.access(candidate, fsSync.constants.X_OK);
-			return candidate;
-		} catch {
-			// keep scanning
-		}
-	}
-	return binaryName;
+	return isExecutableCommandSnap('tectonic');
 }
 
 function formatRuntimeReason(reason: CoRuntimeRelocationReason | undefined): string | undefined {

@@ -5,7 +5,7 @@
 
 import * as assert from 'assert';
 import * as path from 'path';
-import { resolveCoRuntimeDir } from '../index';
+import { resolveCoPaths, resolveCoPersistentPaths, resolveCoRuntimeDir } from '../index';
 
 declare const suite: (name: string, fn: () => void) => void;
 declare const test: (name: string, fn: () => void | Promise<void>) => void;
@@ -41,5 +41,44 @@ suite('CO Storage Runtime', () => {
 		});
 		assert.strictEqual(result.relocated, false);
 		assert.strictEqual(result.baseDir, path.join(configuredBaseDir, 'correcao'));
+	});
+
+	test('resolve caminhos persistentes do diagramador no workspace', () => {
+		const persistent = resolveCoPersistentPaths({
+			feature: 'diagramador',
+			globalStoragePath: path.join(path.sep, 'home', 'co', '.config', 'Code', 'User', 'globalStorage', 'odebrino.co-correcao'),
+			workspaceDir: path.join(path.sep, 'workspaces', 'co-aula'),
+			saveDirOverride: undefined
+		});
+		assert.strictEqual(persistent.source, 'workspace');
+		assert.strictEqual(persistent.baseDir, path.join(path.sep, 'workspaces', 'co-aula', '.co', 'diagramador'));
+	});
+
+	test('resolve caminhos persistentes do diagramador por override', () => {
+		const persistent = resolveCoPersistentPaths({
+			feature: 'diagramador',
+			globalStoragePath: path.join(path.sep, 'home', 'co', '.config', 'Code', 'User', 'globalStorage', 'odebrino.co-diagramador'),
+			saveDirOverride: path.join(path.sep, 'tmp', 'co-save-dir')
+		});
+		assert.strictEqual(persistent.source, 'override');
+		assert.strictEqual(persistent.baseDir, path.join(path.sep, 'tmp', 'co-save-dir'));
+	});
+
+	test('resolve caminhos compartilhados com persistencia e runtime', async () => {
+		const homeDir = path.join(path.sep, 'home', 'co-storage-home-shared');
+		const resolution = await resolveCoPaths({
+			feature: 'correcao',
+			appName: 'CO Dev',
+			globalStoragePath: path.join(homeDir, '.config', 'Code - OSS', 'User', 'globalStorage', 'odebrino.co-correcao'),
+			workspaceDir: path.join(homeDir, 'workspace'),
+			configuredRuntimeBaseDir: path.join(homeDir, '.config', 'hidden-runtime'),
+			homeDir,
+			isSnapTectonic: true,
+			platform: 'linux'
+		});
+		assert.strictEqual(resolution.persistent.baseDir, path.join(homeDir, 'workspace', '.co', 'corrections'));
+		assert.strictEqual(resolution.runtime.relocated, true);
+		assert.strictEqual(resolution.runtime.reason, 'hidden_path_under_snap');
+		assert.match(resolution.runtime.baseDir, /CO-runtime/);
 	});
 });

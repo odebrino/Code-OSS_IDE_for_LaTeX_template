@@ -19,7 +19,13 @@ import {
 	resolveTemplateStoragePaths,
 	resolveTectonicBundlePath
 } from 'co-template-core';
-import { CoRuntimeRelocationReason, LocalStorageProvider, pruneRuntimeChildren, resolveCoRuntimeDir } from 'co-storage-core';
+import {
+	CoRuntimeRelocationReason,
+	LocalStorageProvider,
+	isExecutableCommandSnap,
+	pruneRuntimeChildren,
+	resolveCoPaths
+} from 'co-storage-core';
 import { migrateLegacyProject, parseProject } from 'co-doc-core';
 import { PdfPreviewManager, PreviewOpenResult } from 'co-preview-core';
 import {
@@ -32,20 +38,27 @@ import {
 	CorrecaoTaskSummary,
 	registerCorrecaoView
 } from './webview';
+import { resolveCorrecaoStoragePaths } from './paths';
 
 const TASKS_DIR_NAME = 'tarefas';
-const CORRECTIONS_DIR_NAME = 'corrections';
 const BASE_FILE_NAME = 'base.json';
 const INDEX_FILE_NAME = 'index.json';
 const PREVIEW_DIR_NAME = 'preview';
 const PREVIEW_PDF_NAME = 'preview.pdf';
-const CO_DIAGRAMADOR_EXTENSION_ID = 'odebrino.co-diagramador';
 
 const FIELD_PREFERENCES = ['TaskBody', 'taskBody', 'text', 'Text', 'body', 'Body', 'descricao', 'Descricao', 'conteudo', 'Conteudo'];
 
 const DEFAULT_STATUS: CorrecaoStatus = { state: 'idle' };
 
-export async function activate(context: vscode.ExtensionContext): Promise<void> {
+export async function activate(context: vscode.ExtensionContext): Promise<void | {
+	__test: {
+		getStateSnapshot: () => CorrecaoState;
+		open: () => Promise<void>;
+		refreshTasks: () => Promise<void>;
+		selectTask: (taskId: string) => Promise<void>;
+		getStorageSnapshot: () => { diagramadorBaseDir: string; correctionsBaseDir: string };
+	};
+}> {
 	const controller = new CorrecaoController(context);
 	await controller.initialize();
 	const viewProvider = registerCorrecaoView(
@@ -73,6 +86,23 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			await controller.updateSuggestionFromCommand('rejected');
 		})
 	);
+
+	if (process.env.CO_TESTING === '1') {
+		return {
+			__test: {
+				getStateSnapshot: () => controller.getState(),
+				open: () => controller.open(),
+				refreshTasks: () => controller.refreshTasks(),
+				selectTask: (taskId: string) => controller.selectTask(taskId),
+				getStorageSnapshot: () => ({
+					diagramadorBaseDir: controller.getDiagramadorBaseDir(),
+					correctionsBaseDir: controller.getCorrectionsBaseDir()
+				})
+			}
+		};
+	}
+
+	return undefined;
 }
 
 export function deactivate(): void {
@@ -162,8 +192,14 @@ class CorrecaoController implements vscode.Disposable {
 			onStatus: status => this.handleBuildStatus(status),
 			onComplete: result => this.handleBuildResult(result)
 		});
-		this.diagramadorBaseDir = resolveDiagramadorStorageBaseDir(context);
-		this.correctionsBaseDir = resolveCorrectionsBaseDir(context);
+		const workspaceDir = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+		const storagePaths = resolveCorrecaoStoragePaths({
+			globalStoragePath: context.globalStorageUri.fsPath,
+			workspaceDir,
+			saveDirOverride: process.env.CO_SAVE_DIR
+		});
+		this.diagramadorBaseDir = storagePaths.diagramadorBaseDir;
+		this.correctionsBaseDir = storagePaths.correctionsBaseDir;
 		this.previewRuntimeBaseDir = path.join(os.homedir(), 'CO-runtime', 'bootstrap', 'correcao');
 		this.runtimeInfo = {
 			baseDir: this.previewRuntimeBaseDir,
@@ -232,6 +268,14 @@ class CorrecaoController implements vscode.Disposable {
 			preview: this.previewInfo,
 			runtimeInfo: this.runtimeInfo
 		};
+	}
+
+	getDiagramadorBaseDir(): string {
+		return this.diagramadorBaseDir;
+	}
+
+	getCorrectionsBaseDir(): string {
+		return this.correctionsBaseDir;
 	}
 
 	async handleMessage(message: any): Promise<void> {
@@ -357,24 +401,26 @@ class CorrecaoController implements vscode.Disposable {
 	}
 
 	private async resolveRuntimePaths(): Promise<void> {
-		const runtimeResolution = await resolveCoRuntimeDir({
-			featureName: 'correcao',
+		const resolution = await resolveCoPaths({
+			feature: 'correcao',
 			appName: vscode.env.appName,
-			configuredBaseDir: vscode.workspace.getConfiguration('co.runtime').get<string>('baseDir'),
-			envBaseDir: process.env.CO_RUNTIME_BASE_DIR,
+			globalStoragePath: this.context.globalStorageUri.fsPath,
+			workspaceDir: vscode.workspace.workspaceFolders?.[0]?.uri.fsPath,
+			configuredRuntimeBaseDir: vscode.workspace.getConfiguration('co.runtime').get<string>('baseDir'),
+			envRuntimeBaseDir: process.env.CO_RUNTIME_BASE_DIR,
 			isSnapTectonic: await isSnapTectonicCommand(),
 			platform: process.platform
 		});
-		this.previewRuntimeBaseDir = runtimeResolution.baseDir;
+		this.previewRuntimeBaseDir = resolution.runtime.baseDir;
 		this.runtimeInfo = {
-			baseDir: runtimeResolution.baseDir,
-			outDir: path.join(runtimeResolution.baseDir, PREVIEW_DIR_NAME),
-			relocated: runtimeResolution.relocated,
-			reason: formatRuntimeReason(runtimeResolution.reason),
-			requestedBaseDir: runtimeResolution.requestedRootDir
+			baseDir: resolution.runtime.baseDir,
+			outDir: path.join(resolution.runtime.baseDir, PREVIEW_DIR_NAME),
+			relocated: resolution.runtime.relocated,
+			reason: formatRuntimeReason(resolution.runtime.reason),
+			requestedBaseDir: resolution.runtime.requestedBaseDir
 		};
-		if (runtimeResolution.relocated) {
-			this.output.appendLine(`[${new Date().toISOString()}] Runtime realocado: ${runtimeResolution.requestedRootDir} -> ${runtimeResolution.baseDir}`);
+		if (resolution.runtime.relocated) {
+			this.output.appendLine(`[${new Date().toISOString()}] Runtime realocado: ${resolution.runtime.requestedBaseDir} -> ${resolution.runtime.baseDir}`);
 		}
 		await fs.mkdir(this.previewRuntimeBaseDir, { recursive: true });
 		await pruneRuntimeChildren(this.previewRuntimeBaseDir, { maxAgeDays: 14, maxEntries: 50 });
@@ -790,27 +836,6 @@ function toCorrecaoPreviewInfo(result: PreviewOpenResult, previewPath: string): 
 	};
 }
 
-function resolveDiagramadorStorageBaseDir(context: vscode.ExtensionContext): string {
-	const override = (process.env.CO_SAVE_DIR ?? '').trim();
-	if (override) {
-		return override;
-	}
-	const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
-	if (workspaceFolder) {
-		return path.join(workspaceFolder.uri.fsPath, '.co', 'diagramador');
-	}
-	const globalRoot = path.dirname(context.globalStorageUri.fsPath);
-	return path.join(globalRoot, CO_DIAGRAMADOR_EXTENSION_ID, 'diagramador');
-}
-
-function resolveCorrectionsBaseDir(context: vscode.ExtensionContext): string {
-	const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
-	if (workspaceFolder) {
-		return path.join(workspaceFolder.uri.fsPath, '.co', CORRECTIONS_DIR_NAME);
-	}
-	return path.join(context.globalStorageUri.fsPath, CORRECTIONS_DIR_NAME);
-}
-
 async function listDiagramadorTasks(baseDir: string): Promise<CorrecaoTaskSummary[]> {
 	try {
 		const tasksDir = path.join(baseDir, TASKS_DIR_NAME);
@@ -1041,25 +1066,7 @@ async function isSnapTectonicCommand(): Promise<boolean> {
 	if (configured.includes('/snap/')) {
 		return true;
 	}
-	const resolved = await resolveExecutableOnPath('tectonic');
-	return resolved.includes('/snap/');
-}
-
-async function resolveExecutableOnPath(binaryName: string): Promise<string> {
-	if (path.isAbsolute(binaryName)) {
-		return binaryName;
-	}
-	const searchPath = process.env.PATH ?? '';
-	for (const segment of searchPath.split(path.delimiter)) {
-		const candidate = path.join(segment, binaryName);
-		try {
-			await fs.access(candidate);
-			return candidate;
-		} catch {
-			// keep scanning
-		}
-	}
-	return binaryName;
+	return isExecutableCommandSnap('tectonic');
 }
 
 function formatRuntimeReason(reason: CoRuntimeRelocationReason | undefined): string | undefined {

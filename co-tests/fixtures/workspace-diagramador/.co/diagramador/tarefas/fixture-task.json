@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "templateId": "tarefa",
+  "data": {
+    "TaskLabel": "Lista Fixture",
+    "TaskType": "teorica",
+    "texto": "Texto base da fixture de integracao.",
+    "alunos": [
+      "Aluno 1",
+      "Aluno 2"
+    ]
+  }
+}

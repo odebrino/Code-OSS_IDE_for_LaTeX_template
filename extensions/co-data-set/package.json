@@ -14,7 +14,9 @@
 	],
 	"main": "./out/extension.js",
 	"dependencies": {
-		"co-doc-core": "file:../../packages/co-doc-core"
+		"co-doc-core": "file:../../packages/co-doc-core",
+		"co-storage-core": "file:../../packages/co-storage-core",
+		"co-template-core": "file:../../packages/co-template-core"
 	},
 	"activationEvents": [
 		"onView:co.dataSet.mainView",

@@ -7,6 +7,7 @@ import * as vscode from 'vscode';
 import fs from 'fs/promises';
 import path from 'path';
 import { spawn } from 'child_process';
+import { dedupePaths, resolvePdfJsRoot } from './pdfjs';
 
 export type PreviewMode = 'auto' | 'pdfjs' | 'system' | 'image';
 
@@ -69,6 +70,7 @@ export class PdfPreviewManager implements vscode.Disposable {
 	private readonly title: string;
 	private readonly pdfJsRoot?: string;
 	private readonly pdfJsSearchRoots: string[];
+	private resolvedPdfJsRoot?: string | null;
 	private previewListenerAttached = false;
 
 	constructor(
@@ -80,10 +82,10 @@ export class PdfPreviewManager implements vscode.Disposable {
 		this.previewMode = options.previewMode ?? resolvePreviewMode(options.previewModeEnv, options.appName);
 		this.preferPdfJs = this.previewMode === 'pdfjs' || (this.previewMode === 'auto' && shouldPreferPdfJs(options.appName));
 		this.pdfJsRoot = options.pdfJsRoot;
-		this.pdfJsSearchRoots = [
+		this.pdfJsSearchRoots = dedupePaths([
 			options.extensionRoot,
 			process.cwd()
-		].filter(Boolean);
+		].filter(Boolean));
 		this.output.appendLine(`[${new Date().toISOString()}] Preview mode: ${this.previewMode}${this.preferPdfJs ? ' (prefer pdfjs)' : ''}`);
 	}
 
@@ -282,7 +284,7 @@ export class PdfPreviewManager implements vscode.Disposable {
 	}
 
 	private async resolvePdfJsPaths(): Promise<PdfJsPaths | undefined> {
-		const root = this.pdfJsRoot ?? await resolvePdfJsRoot(this.pdfJsSearchRoots);
+		const root = await this.getResolvedPdfJsRoot();
 		if (!root) {
 			return undefined;
 		}
@@ -319,6 +321,18 @@ export class PdfPreviewManager implements vscode.Disposable {
 			cMapDir,
 			standardFontsDir
 		};
+	}
+
+	private async getResolvedPdfJsRoot(): Promise<string | undefined> {
+		if (this.pdfJsRoot) {
+			return this.pdfJsRoot;
+		}
+		if (this.resolvedPdfJsRoot !== undefined) {
+			return this.resolvedPdfJsRoot ?? undefined;
+		}
+		const resolved = await resolvePdfJsRoot(this.pdfJsSearchRoots);
+		this.resolvedPdfJsRoot = resolved ?? null;
+		return resolved;
 	}
 
 	private async showPreviewWebviewPdfJs(viewPath: string, viewColumn: vscode.ViewColumn): Promise<boolean> {
@@ -960,33 +974,6 @@ function mapStatusReason(state: PdfPreviewState): PreviewReasonCode | undefined 
 function shouldPreferPdfJs(appName: string): boolean {
 	const lower = appName.toLowerCase();
 	return lower.includes('dev') || lower.includes('oss');
-}
-
-async function resolvePdfJsRoot(searchRoots: string[]): Promise<string | undefined> {
-	const roots = searchRoots.length ? searchRoots : [process.cwd()];
-	for (const root of roots) {
-		const found = await findPdfJsRoot(root);
-		if (found) {
-			return found;
-		}
-	}
-	return undefined;
-}
-
-async function findPdfJsRoot(startDir: string): Promise<string | undefined> {
-	let current = startDir;
-	for (let depth = 0; depth < 7; depth += 1) {
-		const candidate = path.join(current, 'node_modules', 'pdfjs-dist');
-		if (await fileExists(path.join(candidate, 'package.json'))) {
-			return candidate;
-		}
-		const parent = path.dirname(current);
-		if (parent === current) {
-			break;
-		}
-		current = parent;
-	}
-	return undefined;
 }
 
 async function fileExists(filePath: string): Promise<boolean> {

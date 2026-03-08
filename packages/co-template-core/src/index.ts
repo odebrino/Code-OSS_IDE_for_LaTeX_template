@@ -54,6 +54,27 @@ export type TemplateStoragePaths = {
 
 type TemplateStorageInput = TemplateStoragePaths | string;
 
+export type TemplateLoadIssueCode =
+	| 'manifest_missing'
+	| 'manifest_unreadable'
+	| 'manifest_invalid'
+	| 'entry_missing'
+	| 'preview_data_unreadable';
+
+export type TemplateLoadIssue = {
+	id: string;
+	dir: string;
+	readOnly: boolean;
+	code: TemplateLoadIssueCode;
+	path: string;
+	message: string;
+};
+
+export type TemplateScanResult = {
+	templates: TemplateSummary[];
+	issues: TemplateLoadIssue[];
+};
+
 export type TemplateValidationResult = {
 	ok: boolean;
 	errors: string[];
@@ -192,21 +213,32 @@ function normalizeStorage(storage: TemplateStorageInput, fallbackDir?: string): 
 }
 
 export async function listTemplates(storage: TemplateStorageInput, fallbackDir?: string): Promise<TemplateSummary[]> {
+	const scanned = await scanTemplateStorage(storage, fallbackDir);
+	return scanned.templates;
+}
+
+export async function scanTemplateStorage(storage: TemplateStorageInput, fallbackDir?: string): Promise<TemplateScanResult> {
 	const resolved = normalizeStorage(storage, fallbackDir);
 	const summaries = new Map<string, TemplateSummary>();
-	const primary = await readTemplatesFromDir(resolved.primaryDir, false);
-	for (const summary of primary) {
+	const issues: TemplateLoadIssue[] = [];
+	const primary = await scanTemplatesFromDir(resolved.primaryDir, false);
+	for (const summary of primary.templates) {
 		summaries.set(summary.id, summary);
 	}
+	issues.push(...primary.issues);
 	if (resolved.fallbackDir) {
-		const fallback = await readTemplatesFromDir(resolved.fallbackDir, true);
-		for (const summary of fallback) {
+		const fallback = await scanTemplatesFromDir(resolved.fallbackDir, true);
+		for (const summary of fallback.templates) {
 			if (!summaries.has(summary.id)) {
 				summaries.set(summary.id, summary);
 			}
 		}
+		issues.push(...fallback.issues);
 	}
-	return Array.from(summaries.values()).sort((a, b) => a.name.localeCompare(b.name));
+	return {
+		templates: Array.from(summaries.values()).sort((a, b) => a.name.localeCompare(b.name)),
+		issues
+	};
 }
 
 export async function loadTemplate(storage: TemplateStorageInput, id: string, fallbackDir?: string): Promise<TemplatePackage | undefined> {
@@ -746,10 +778,11 @@ function isValidFieldType(value: any): value is TemplateFieldType {
 	return value === 'string' || value === 'string[]' || value === 'number' || value === 'boolean' || value === 'latex';
 }
 
-async function readTemplatesFromDir(dir: string, readOnly: boolean): Promise<TemplateSummary[]> {
+async function scanTemplatesFromDir(dir: string, readOnly: boolean): Promise<TemplateScanResult> {
 	try {
 		const entries = await fs.readdir(dir, { withFileTypes: true });
 		const summaries: TemplateSummary[] = [];
+		const issues: TemplateLoadIssue[] = [];
 		for (const entry of entries) {
 			if (!entry.isDirectory()) {
 				continue;
@@ -757,15 +790,66 @@ async function readTemplatesFromDir(dir: string, readOnly: boolean): Promise<Tem
 			const templateDir = path.join(dir, entry.name);
 			const manifestPath = path.join(templateDir, 'template.json');
 			if (!await fileExists(manifestPath)) {
+				if (await looksLikeTemplateDir(templateDir)) {
+					issues.push({
+						id: entry.name,
+						dir: templateDir,
+						readOnly,
+						code: 'manifest_missing',
+						path: manifestPath,
+						message: 'template.json ausente.'
+					});
+				}
 				continue;
 			}
-			const manifest = await readJsonFile<TemplateManifest>(manifestPath);
-			if (!manifest) {
+			const manifestResult = await readJsonFileDetailed<TemplateManifest>(manifestPath);
+			if (manifestResult.kind !== 'ok' || !manifestResult.value) {
+				issues.push({
+					id: entry.name,
+					dir: templateDir,
+					readOnly,
+					code: 'manifest_unreadable',
+					path: manifestPath,
+					message: 'Nao foi possivel ler template.json.'
+				});
 				continue;
 			}
+			const manifest = manifestResult.value;
 			const validation = validateTemplate(manifest, { dirName: entry.name });
 			if (!validation.ok) {
+				issues.push({
+					id: manifest.id || entry.name,
+					dir: templateDir,
+					readOnly,
+					code: 'manifest_invalid',
+					path: manifestPath,
+					message: validation.errors.join(' | ')
+				});
 				continue;
+			}
+			const entryPath = path.join(templateDir, manifest.entry);
+			if (!await fileExists(entryPath)) {
+				issues.push({
+					id: manifest.id,
+					dir: templateDir,
+					readOnly,
+					code: 'entry_missing',
+					path: entryPath,
+					message: `Arquivo de entrada ausente: ${manifest.entry}.`
+				});
+				continue;
+			}
+			const previewPath = path.join(templateDir, 'preview_data.json');
+			const previewResult = await readJsonFileDetailed<Record<string, any>>(previewPath);
+			if (previewResult.kind === 'error') {
+				issues.push({
+					id: manifest.id,
+					dir: templateDir,
+					readOnly,
+					code: 'preview_data_unreadable',
+					path: previewPath,
+					message: 'preview_data.json existe mas nao pode ser lido.'
+				});
 			}
 			summaries.push({
 				id: manifest.id,
@@ -776,9 +860,9 @@ async function readTemplatesFromDir(dir: string, readOnly: boolean): Promise<Tem
 				readOnly
 			});
 		}
-		return summaries;
+		return { templates: summaries, issues };
 	} catch {
-		return [];
+		return { templates: [], issues: [] };
 	}
 }
 
@@ -817,12 +901,34 @@ async function loadTemplateFromDir(dir: string, id: string, readOnly: boolean): 
 }
 
 async function readJsonFile<T>(filePath: string): Promise<T | undefined> {
+	const result = await readJsonFileDetailed<T>(filePath);
+	return result.kind === 'ok' ? result.value : undefined;
+}
+
+async function readJsonFileDetailed<T>(filePath: string): Promise<
+	| { kind: 'ok'; value: T }
+	| { kind: 'missing' }
+	| { kind: 'error' }
+> {
 	try {
 		const raw = await fs.readFile(filePath, 'utf8');
-		return JSON.parse(raw) as T;
+		return { kind: 'ok', value: JSON.parse(raw) as T };
 	} catch {
-		return undefined;
+		if (!await fileExists(filePath)) {
+			return { kind: 'missing' };
+		}
+		return { kind: 'error' };
 	}
+}
+
+async function looksLikeTemplateDir(dir: string): Promise<boolean> {
+	const candidates = ['main.tex', 'preview_data.json', 'assets'];
+	for (const candidate of candidates) {
+		if (await fileExists(path.join(dir, candidate))) {
+			return true;
+		}
+	}
+	return false;
 }
 
 async function fileExists(filePath: string) {

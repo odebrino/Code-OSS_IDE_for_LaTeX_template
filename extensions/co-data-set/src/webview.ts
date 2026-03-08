@@ -12,7 +12,7 @@ type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string
 export type DataSetItemSummary = {
 	id: string;
 	name: string;
-	type: 'project' | 'task' | 'template' | 'pdf';
+	type: 'project' | 'task' | 'template' | 'pdf' | 'log';
 	location: 'workspace' | 'global';
 	pathLabel: string;
 	detail?: string;
@@ -332,6 +332,10 @@ function getDataSetHtml(webview: vscode.Webview, state: DataSetState, uiBuildId:
 		background: rgba(244, 63, 94, 0.2);
 		color: #fecdd3;
 	}
+	.tag.type-log {
+		background: rgba(249, 115, 22, 0.2);
+		color: #fed7aa;
+	}
 	.tag.tag-location {
 		background: rgba(148, 163, 184, 0.2);
 		color: #e2e8f0;
@@ -391,6 +395,7 @@ function getDataSetHtml(webview: vscode.Webview, state: DataSetState, uiBuildId:
 						<option value="task">Tarefa</option>
 						<option value="template">Template</option>
 						<option value="pdf">PDF</option>
+						<option value="log">Log</option>
 					</select>
 				</div>
 				<div class="field">
@@ -517,10 +522,16 @@ function getDataSetHtml(webview: vscode.Webview, state: DataSetState, uiBuildId:
 					? 'Tarefa'
 					: item.type === 'template'
 						? 'Template'
-						: 'PDF';
+						: item.type === 'log'
+							? 'Log'
+							: 'PDF';
 			const locationLabel = item.location === 'workspace' ? 'Workspace' : 'Global';
 			const disabled = item.canOpen ? '' : 'disabled';
-			const buttonLabel = item.type === 'pdf' ? 'Abrir PDF' : 'Abrir arquivo';
+			const buttonLabel = item.type === 'pdf'
+				? 'Abrir PDF'
+				: item.type === 'log'
+					? 'Abrir log'
+					: 'Abrir arquivo';
 			const detailHtml = item.detail ? '<span>' + escapeHtml(item.detail) + '</span>' : '';
 			return '<div class="result-card">'
 				+ '<div class="result-title">' + escapeHtml(item.name) + '</div>'

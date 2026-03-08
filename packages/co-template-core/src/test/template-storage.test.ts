@@ -10,6 +10,7 @@ import * as path from 'path';
 import {
 	listTemplates,
 	loadTemplate,
+	scanTemplateStorage,
 	saveTemplate,
 	TemplateManifest
 } from '../index';
@@ -43,6 +44,22 @@ suite('Template Core Storage', () => {
 			assert.ok(loaded);
 			assert.strictEqual(loaded?.manifest.id, 'template-test');
 			assert.ok(loaded?.mainTex.includes('{{Title}}'));
+		} finally {
+			await fs.rm(root, { recursive: true, force: true });
+		}
+	});
+
+	test('scanTemplateStorage reporta manifestos invalidos sem sumir silenciosamente', async () => {
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), 'co-template-scan-'));
+		try {
+			const brokenDir = path.join(root, 'template-quebrado');
+			await fs.mkdir(brokenDir, { recursive: true });
+			await fs.writeFile(path.join(brokenDir, 'template.json'), '{"id":"template-quebrado","name":"Quebrado"}', 'utf8');
+			await fs.writeFile(path.join(brokenDir, 'main.tex'), '\\documentclass{article}', 'utf8');
+
+			const scan = await scanTemplateStorage(root);
+			assert.strictEqual(scan.templates.length, 0);
+			assert.ok(scan.issues.some(issue => issue.id === 'template-quebrado' && issue.code === 'manifest_invalid'));
 		} finally {
 			await fs.rm(root, { recursive: true, force: true });
 		}

@@ -39,6 +39,15 @@ if (!fs.existsSync(workspacePath)) {
 const userDataDir = fs.mkdtempSync(path.join(os.tmpdir(), `co-tests-user-${extensionName}-`));
 const extensionsDir = fs.mkdtempSync(path.join(os.tmpdir(), `co-tests-ext-${extensionName}-`));
 const runtimeBaseDir = path.join(os.tmpdir(), `co-runtime-${extensionName}`);
+const workspaceCopyParent = fs.mkdtempSync(path.join(os.tmpdir(), `co-tests-workspace-${extensionName}-`));
+const workspaceCopyPath = path.join(workspaceCopyParent, path.basename(workspacePath));
+
+fs.cpSync(workspacePath, workspaceCopyPath, {
+	recursive: true,
+	force: true,
+	errorOnExist: false,
+	preserveTimestamps: true
+});
 
 for (const key of Object.keys(process.env)) {
 	if (key === 'ELECTRON_RUN_AS_NODE' || key === 'ELECTRON_NO_ATTACH_CONSOLE' || key.startsWith('VSCODE_')) {
@@ -47,7 +56,7 @@ for (const key of Object.keys(process.env)) {
 }
 
 const launchArgs = [
-	workspacePath,
+	workspaceCopyPath,
 	`--user-data-dir=${userDataDir}`,
 	`--extensions-dir=${extensionsDir}`,
 	'--disable-extensions',
@@ -70,7 +79,7 @@ try {
 		extensionTestsEnv: {
 			CO_TESTING: '1',
 			TECTONIC_PATH: '__missing__',
-			CO_TEST_WORKSPACE: workspacePath,
+			CO_TEST_WORKSPACE: workspaceCopyPath,
 			CO_RUNTIME_BASE_DIR: runtimeBaseDir
 		}
 	});
@@ -78,4 +87,5 @@ try {
 	fs.rmSync(userDataDir, { recursive: true, force: true });
 	fs.rmSync(extensionsDir, { recursive: true, force: true });
 	fs.rmSync(runtimeBaseDir, { recursive: true, force: true });
+	fs.rmSync(workspaceCopyParent, { recursive: true, force: true });
 }

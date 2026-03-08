@@ -7,11 +7,14 @@ import * as vscode from 'vscode';
 import path from 'path';
 import fs from 'fs/promises';
 import { migrateLegacyProject, parseProject } from 'co-doc-core';
+import { isExecutableCommandSnap } from 'co-storage-core';
+import { scanTemplateStorage } from 'co-template-core';
 import { DataSetItemSummary, DataSetState, registerDataSetView } from './webview';
+import { collectWatchDirs, resolveDataSetScanRoots, ScanRoot } from './scanRoots';
 
 type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
 
-type DataSetItemType = 'project' | 'task' | 'template' | 'pdf';
+type DataSetItemType = 'project' | 'task' | 'template' | 'pdf' | 'log';
 type DataSetLocation = 'workspace' | 'global';
 
 type DataSetItem = {
@@ -25,20 +28,7 @@ type DataSetItem = {
 	detail?: string;
 };
 
-type ScanRoot = {
-	id: string;
-	label: string;
-	location: DataSetLocation;
-	baseDir: string;
-	diagramadorDir?: string;
-	templatesDir?: string;
-};
-
-const CO_DIAGRAMADOR_EXTENSION_ID = 'odebrino.co-diagramador';
-const TEMPLATE_STORAGE_DIR = 'co-template-core';
 const TASKS_DIR_NAME = 'tarefas';
-const OUT_DIR_NAME = 'out';
-const TEMPLATE_PREVIEW_DIR_NAME = 'template-preview';
 const PREVIEW_VIEW_PREFIX = 'preview_view_';
 const SCAN_DEBOUNCE_MS = 450;
 const STATUS_THROTTLE_MS = 300;
@@ -56,15 +46,27 @@ const IGNORED_DIRS = new Set<string>([
 	'dist'
 ]);
 
-export async function activate(context: vscode.ExtensionContext): Promise<void> {
-	let roots = resolveScanRoots(context);
+export async function activate(context: vscode.ExtensionContext): Promise<void | {
+	__test: {
+		getStateSnapshot: () => DataSetState;
+		refresh: () => Promise<void>;
+		getRootsSnapshot: () => Array<{
+			id: string;
+			label: string;
+			diagramadorDir?: string;
+			runtimeDirs: string[];
+			templateDirs: string[];
+		}>;
+	};
+}> {
+	let roots = await refreshRoots();
 	let items: DataSetItem[] = [];
 	const itemById = new Map<string, DataSetItem>();
 	let scanTimer: NodeJS.Timeout | undefined;
 	let scanTokenSource: vscode.CancellationTokenSource | undefined;
 	let scanCounter = 0;
 	let lastStatusAt = 0;
-	const watcherRoots = new Set<string>();
+	const watchers = new Map<string, vscode.FileSystemWatcher>();
 
 	const viewProvider = registerDataSetView(context, message => onMessage(message), () => getState(), () => {
 		scheduleRefresh('visible');
@@ -79,14 +81,30 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			await refreshItems('manual');
 		}),
 		vscode.workspace.onDidChangeWorkspaceFolders(() => {
-			roots = resolveScanRoots(context);
-			ensureWatchers();
-			scheduleRefresh('workspace');
+			void reloadRoots('workspace');
 		})
 	);
 
-	ensureWatchers();
+	await ensureWatchers();
 	await refreshItems('startup');
+
+	if (process.env.CO_TESTING === '1') {
+		return {
+			__test: {
+				getStateSnapshot: () => getState(),
+				refresh: async () => refreshItems('test'),
+				getRootsSnapshot: () => roots.map(root => ({
+					id: root.id,
+					label: root.label,
+					diagramadorDir: root.diagramadorDir,
+					runtimeDirs: root.runtimeDirs.slice(),
+					templateDirs: root.templateDirs.slice()
+				}))
+			}
+		};
+	}
+
+	return undefined;
 
 	function getState(): DataSetState {
 		return {
@@ -144,7 +162,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		}
 		viewProvider.sendState(getState());
 		viewProvider.sendStatus({ state: 'ready', message: `${items.length} itens` });
-		ensureWatchers();
+		await ensureWatchers();
 	}
 
 	async function onMessage(message: { type?: string;[key: string]: JsonValue | undefined }): Promise<void> {
@@ -179,21 +197,37 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 		});
 	}
 
+	async function reloadRoots(reason: string) {
+		roots = await refreshRoots();
+		await ensureWatchers();
+		viewProvider.sendState(getState());
+		scheduleRefresh(reason);
+	}
+
+	async function refreshRoots(): Promise<ScanRoot[]> {
+		return resolveDataSetScanRoots({
+			workspaceFolders: (vscode.workspace.workspaceFolders ?? []).map(folder => ({
+				name: folder.name,
+				fsPath: folder.uri.fsPath
+			})),
+			globalStoragePath: context.globalStorageUri.fsPath,
+			appName: vscode.env.appName,
+			configuredRuntimeBaseDir: vscode.workspace.getConfiguration('co.runtime').get<string>('baseDir'),
+			envRuntimeBaseDir: process.env.CO_RUNTIME_BASE_DIR,
+			saveDirOverride: process.env.CO_SAVE_DIR,
+			platform: process.platform,
+			isSnapTectonic: await isSnapTectonicCommand()
+		});
+	}
+
 	async function ensureWatchers() {
-		const watchDirs = new Set<string>();
-		for (const root of roots) {
-			if (root.diagramadorDir) {
-				watchDirs.add(root.diagramadorDir);
-			}
-			if (root.templatesDir) {
-				watchDirs.add(root.templatesDir);
-			}
-		}
-		for (const dir of watchDirs) {
-			if (watcherRoots.has(dir)) {
+		const nextWatchDirs = new Set<string>();
+		for (const dir of collectWatchDirs(roots)) {
+			if (!await fileExists(dir)) {
 				continue;
 			}
-			if (!await fileExists(dir)) {
+			nextWatchDirs.add(dir);
+			if (watchers.has(dir)) {
 				continue;
 			}
 			const pattern = new vscode.RelativePattern(vscode.Uri.file(dir), '**/*');
@@ -201,46 +235,17 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
 			watcher.onDidChange(() => scheduleRefresh('watch'));
 			watcher.onDidCreate(() => scheduleRefresh('watch'));
 			watcher.onDidDelete(() => scheduleRefresh('watch'));
-			watcherRoots.add(dir);
+			watchers.set(dir, watcher);
 			context.subscriptions.push(watcher);
 		}
+		for (const [dir, watcher] of watchers) {
+			if (nextWatchDirs.has(dir)) {
+				continue;
+			}
+			watcher.dispose();
+			watchers.delete(dir);
+		}
 	}
-}
-
-function resolveScanRoots(context: vscode.ExtensionContext): ScanRoot[] {
-	const roots: ScanRoot[] = [];
-	const workspaceFolders = vscode.workspace.workspaceFolders ?? [];
-	for (const folder of workspaceFolders) {
-		const baseDir = folder.uri.fsPath;
-		roots.push({
-			id: `workspace:${baseDir}`,
-			label: `Workspace: ${folder.name}`,
-			location: 'workspace',
-			baseDir,
-			diagramadorDir: path.join(baseDir, '.co', 'diagramador'),
-			templatesDir: path.join(baseDir, '.co', 'templates')
-		});
-	}
-	const globalRoot = path.dirname(context.globalStorageUri.fsPath);
-	roots.push({
-		id: 'global',
-		label: 'Global',
-		location: 'global',
-		baseDir: globalRoot,
-		diagramadorDir: path.join(globalRoot, CO_DIAGRAMADOR_EXTENSION_ID, 'diagramador'),
-		templatesDir: path.join(globalRoot, TEMPLATE_STORAGE_DIR, 'templates')
-	});
-	const override = (process.env.CO_SAVE_DIR ?? '').trim();
-	if (override) {
-		roots.push({
-			id: `custom:${override}`,
-			label: `CO_SAVE_DIR: ${override}`,
-			location: 'global',
-			baseDir: override,
-			diagramadorDir: override
-		});
-	}
-	return roots;
 }
 
 async function scanRoots(
@@ -265,7 +270,7 @@ async function scanRoots(
 		if (token.isCancellationRequested) {
 			break;
 		}
-		if (root.templatesDir) {
+		if (root.templateDirs.length) {
 			await scanTemplatesRoot(root, results, seen, token, () => {
 				count += 1;
 				onProgress(`${count} itens`);
@@ -333,11 +338,7 @@ async function scanDiagramadorRoot(
 		}
 	}
 
-	const pdfTargets = [
-		path.join(root.diagramadorDir, OUT_DIR_NAME),
-		path.join(root.diagramadorDir, TEMPLATE_PREVIEW_DIR_NAME)
-	];
-	for (const dir of pdfTargets) {
+	for (const dir of root.runtimeDirs) {
 		if (token.isCancellationRequested || results.length >= MAX_RESULTS) {
 			return;
 		}
@@ -363,6 +364,19 @@ async function scanDiagramadorRoot(
 			});
 			onItem();
 		}
+		const logPath = path.join(dir, 'build.log');
+		if (await fileExists(logPath)) {
+			pushItem(results, seen, {
+				id: makeItemId('log', root.location, logPath),
+				name: path.basename(logPath),
+				type: 'log',
+				location: root.location,
+				sourcePath: logPath,
+				openPath: logPath,
+				pathLabel: formatPathLabel(root, logPath)
+			});
+			onItem();
+		}
 	}
 }
 
@@ -373,37 +387,28 @@ async function scanTemplatesRoot(
 	token: vscode.CancellationToken,
 	onItem: () => void
 ): Promise<void> {
-	if (!root.templatesDir || !await fileExists(root.templatesDir)) {
-		return;
-	}
-	const entries = await safeReadDir(root.templatesDir);
-	for (const entry of entries) {
-		if (token.isCancellationRequested || results.length >= MAX_RESULTS) {
-			return;
-		}
-		if (!entry.isDirectory()) {
+	for (const templateDir of root.templateDirs) {
+		if (!await fileExists(templateDir)) {
 			continue;
 		}
-		const templateDir = path.join(root.templatesDir, entry.name);
-		const manifestPath = path.join(templateDir, 'template.json');
-		if (!await fileExists(manifestPath)) {
-			continue;
+		const scan = await scanTemplateStorage(templateDir);
+		for (const template of scan.templates) {
+			if (token.isCancellationRequested || results.length >= MAX_RESULTS) {
+				return;
+			}
+			const manifestPath = path.join(template.path, 'template.json');
+			pushItem(results, seen, {
+				id: makeItemId('template', root.location, template.path),
+				name: template.name,
+				type: 'template',
+				location: root.location,
+				sourcePath: template.path,
+				openPath: manifestPath,
+				pathLabel: formatPathLabel(root, template.path),
+				detail: template.version ? `v${template.version}` : undefined
+			});
+			onItem();
 		}
-		const manifest = await readJson(manifestPath);
-		const id = typeof manifest?.id === 'string' ? manifest.id : entry.name;
-		const name = typeof manifest?.name === 'string' ? manifest.name : id;
-		const version = typeof manifest?.version === 'string' ? manifest.version : undefined;
-		pushItem(results, seen, {
-			id: makeItemId('template', root.location, templateDir),
-			name,
-			type: 'template',
-			location: root.location,
-			sourcePath: templateDir,
-			openPath: manifestPath,
-			pathLabel: formatPathLabel(root, templateDir),
-			detail: version ? `v${version}` : undefined
-		});
-		onItem();
 	}
 }
 
@@ -521,15 +526,6 @@ async function safeReadDir(dir: string): Promise<Array<import('fs').Dirent>> {
 	}
 }
 
-async function readJson(filePath: string): Promise<any | null> {
-	try {
-		const raw = await fs.readFile(filePath, 'utf8');
-		return JSON.parse(raw);
-	} catch {
-		return null;
-	}
-}
-
 async function fileExists(filePath: string): Promise<boolean> {
 	try {
 		await fs.stat(filePath);
@@ -541,4 +537,12 @@ async function fileExists(filePath: string): Promise<boolean> {
 
 function isPlainObject(value: any): value is Record<string, any> {
 	return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+async function isSnapTectonicCommand(): Promise<boolean> {
+	const configured = (process.env.TECTONIC_PATH ?? '').trim();
+	if (configured.includes('/snap/')) {
+		return true;
+	}
+	return isExecutableCommandSnap('tectonic');
 }

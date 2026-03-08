@@ -648,8 +648,8 @@ function getDiagramadorHtml(
 	<section class="hero">
 		<div>
 			<div class="eyebrow">CO Diagramador</div>
-			<h1>Fluxo por tarefa</h1>
-			<p class="lead">A tela principal agora mostra apenas a lista. Os campos do documento aparecem somente quando uma tarefa e aberta.</p>
+			<h1>Edicao por tarefa</h1>
+			<p class="lead">Organize suas tarefas em uma lista simples e abra apenas a que estiver editando. Os campos do documento aparecem somente quando uma tarefa estiver aberta.</p>
 		</div>
 		<div class="status-stack">
 			<div id="status" class="status-chip" data-state="idle">Selecione ou crie uma tarefa.</div>
@@ -657,42 +657,10 @@ function getDiagramadorHtml(
 		</div>
 	</section>
 
-	<section id="buildErrorCard" class="card">
-		<div class="card-header">
-			<h2 class="card-title">Build e Preview</h2>
-			<div class="actions">
-				<button id="buildRetryButton" type="button" class="primary-button">Tentar novamente</button>
-				<button id="buildLogButton" type="button" class="secondary-button">Abrir log</button>
-				<button id="buildFolderButton" type="button" class="secondary-button">Abrir pasta</button>
-			</div>
-		</div>
-		<div class="info-grid">
-			<div class="info-card">
-				<span class="info-label">Runtime ativo</span>
-				<div id="runtimeSummaryValue" class="info-value">Runtime ainda nao resolvido.</div>
-			</div>
-			<div class="info-card">
-				<span class="info-label">Realocacao</span>
-				<div id="runtimeReasonValue" class="info-value">Sem realocacao automatica.</div>
-			</div>
-			<div class="info-card">
-				<span class="info-label">Base solicitada</span>
-				<div id="runtimeRequestedValue" class="info-value">-</div>
-			</div>
-		</div>
-		<p id="buildError" class="error-copy hidden"></p>
-		<p id="buildErrorDetail" class="empty-copy hidden"></p>
-		<div id="buildDetailsPanel" class="detail-list hidden">
-			<div class="info-label">Detalhes tecnicos</div>
-			<div id="buildDetailsList" class="detail-list"></div>
-		</div>
-	</section>
-
 	<section id="listView" class="card">
 		<div class="card-header">
 			<div>
 				<h2 class="card-title">Suas Tarefas</h2>
-				<p class="empty-copy">Crie uma tarefa e abra apenas o documento que deseja editar.</p>
 			</div>
 			<button id="newTaskButton" type="button" class="primary-button">Nova Tarefa</button>
 		</div>
@@ -804,30 +772,25 @@ function getDiagramadorHtml(
 								<div id="createTaskTypeError" class="modal-error hidden"></div>
 							</div>
 						</section>
-
-						<section class="modal-panel">
-							<h3>Template inicial</h3>
-							<p>O template fica readonly na tela principal depois da criacao.</p>
-							<div class="option-grid">
-								<button type="button" class="option-card" data-template-id="tarefa">
-									<span class="option-title">tarefa</span>
-									<span class="option-description">Modelo padrao do diagramador para atividade comum.</span>
-								</button>
-								<button type="button" class="option-card" data-template-id="oficio">
-									<span class="option-title">oficio</span>
-									<span class="option-description">Estrutura enxuta para comunicacao formal.</span>
-								</button>
-							</div>
-							<div class="modal-errors">
-								<div id="createTaskTemplateError" class="modal-error hidden"></div>
-							</div>
-						</section>
 					</div>
 
 					<div class="modal-column">
 						<section class="modal-panel">
 							<h3>Resumo da criacao</h3>
 							<p>O editor sera aberto assim que a tarefa for criada e o build inicial for agendado.</p>
+							<div class="modal-field">
+								<label class="modal-field-label">Modelo inicial</label>
+								<div class="option-grid">
+									<button type="button" class="option-card" data-template-id="tarefa">
+										<span class="option-title">tarefa</span>
+										<span class="option-description">Modelo padrao do diagramador para atividade comum.</span>
+									</button>
+									<button type="button" class="option-card" data-template-id="oficio">
+										<span class="option-title">oficio</span>
+										<span class="option-description">Estrutura enxuta para comunicacao formal.</span>
+									</button>
+								</div>
+							</div>
 							<div class="modal-preview">
 								<div class="modal-preview-item">
 									<span class="modal-preview-label">Nome</span>
@@ -838,16 +801,12 @@ function getDiagramadorHtml(
 									<span id="createTaskPreviewType" class="modal-preview-value">teorica</span>
 								</div>
 								<div class="modal-preview-item">
-									<span class="modal-preview-label">Template</span>
+									<span class="modal-preview-label">Modelo inicial</span>
 									<span id="createTaskPreviewTemplate" class="modal-preview-value">tarefa</span>
 								</div>
 							</div>
-						</section>
-
-						<section class="modal-panel">
-							<h3>Validacao</h3>
-							<p>Os erros voltam inline sem fechar o modal. Teclas rapidas: <strong>Enter</strong> cria, <strong>Esc</strong> fecha.</p>
 							<div class="modal-errors">
+								<div id="createTaskTemplateError" class="modal-error hidden"></div>
 								<div id="createTaskGeneralError" class="modal-error hidden"></div>
 							</div>
 						</section>
