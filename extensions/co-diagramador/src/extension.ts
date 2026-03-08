@@ -1197,7 +1197,7 @@ export class DiagramadorController implements vscode.Disposable {
 
 	private async createTask(
 		message?: { label?: string; taskType?: string; templateId?: string },
-		webview?: vscode.Webview
+		webview?: DiagramadorMessageTarget
 	) {
 		const request = await this.resolveCreateTaskRequest(message, webview);
 		if (!request) {
@@ -1228,7 +1228,7 @@ export class DiagramadorController implements vscode.Disposable {
 
 	private async resolveCreateTaskRequest(
 		message: { label?: string; taskType?: string; templateId?: string } | undefined,
-		webview?: vscode.Webview
+		webview?: DiagramadorMessageTarget
 	): Promise<{ label: string; taskType: DiagramadorTaskType; templateId: string } | undefined> {
 		await this.ensureSeedTemplates();
 		await this.refreshTemplates();
