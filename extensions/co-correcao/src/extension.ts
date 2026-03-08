@@ -7,21 +7,25 @@ import * as vscode from 'vscode';
 import path from 'path';
 import fs from 'fs/promises';
 import crypto from 'crypto';
+import os from 'os';
 import {
 	TemplateBuildResult,
 	TemplateBuildService,
 	TemplateBuildStatus,
 	TemplatePackage,
 	TemplateStoragePaths,
+	describeTemplateBuildFailure,
 	loadTemplate,
 	resolveTemplateStoragePaths,
 	resolveTectonicBundlePath
 } from 'co-template-core';
-import { LocalStorageProvider } from 'co-storage-core';
+import { CoRuntimeRelocationReason, LocalStorageProvider, pruneRuntimeChildren, resolveCoRuntimeDir } from 'co-storage-core';
 import { migrateLegacyProject, parseProject } from 'co-doc-core';
-import { PdfPreviewManager } from 'co-preview-core';
+import { PdfPreviewManager, PreviewOpenResult } from 'co-preview-core';
 import {
+	CorrecaoBuildDetails,
 	CorrecaoFieldSummary,
+	CorrecaoPreviewInfo,
 	CorrecaoRevisionSummary,
 	CorrecaoState,
 	CorrecaoStatus,
@@ -129,6 +133,9 @@ class CorrecaoController implements vscode.Disposable {
 	private status: CorrecaoStatus = DEFAULT_STATUS;
 	private buildError?: string;
 	private buildLogPath?: string;
+	private buildOutDir?: string;
+	private buildDetails?: CorrecaoBuildDetails;
+	private previewInfo: CorrecaoPreviewInfo = { state: 'idle', message: 'Selecione uma tarefa para gerar o PDF.' };
 	private currentProject?: TaskProject;
 	private templateStorage: TemplateStoragePaths;
 	private templateCache = new Map<string, TemplatePackage>();
@@ -139,6 +146,8 @@ class CorrecaoController implements vscode.Disposable {
 	private readonly diagramadorBaseDir: string;
 	private readonly correctionsBaseDir: string;
 	private bundlePath?: string;
+	private previewRuntimeBaseDir: string;
+	private runtimeInfo: CorrecaoState['runtimeInfo'];
 
 	constructor(private readonly context: vscode.ExtensionContext) {
 		this.output = vscode.window.createOutputChannel('CO Correcao');
@@ -153,14 +162,21 @@ class CorrecaoController implements vscode.Disposable {
 			onStatus: status => this.handleBuildStatus(status),
 			onComplete: result => this.handleBuildResult(result)
 		});
-		this.diagramadorBaseDir = resolveDiagramadorBaseDir(context);
+		this.diagramadorBaseDir = resolveDiagramadorStorageBaseDir(context);
 		this.correctionsBaseDir = resolveCorrectionsBaseDir(context);
+		this.previewRuntimeBaseDir = path.join(os.homedir(), 'CO-runtime', 'bootstrap', 'correcao');
+		this.runtimeInfo = {
+			baseDir: this.previewRuntimeBaseDir,
+			outDir: path.join(this.previewRuntimeBaseDir, PREVIEW_DIR_NAME),
+			relocated: false
+		};
 		this.correctionsStorage = new LocalStorageProvider(this.correctionsBaseDir);
 		const repoRoot = path.resolve(context.extensionPath, '..', '..');
 		this.templateStorage = resolveTemplateStoragePaths(context.globalStorageUri.fsPath, repoRoot);
 	}
 
 	async initialize(): Promise<void> {
+		await this.resolveRuntimePaths();
 		await this.refreshTasks();
 		if (this.tasks.length) {
 			await this.selectTask(this.tasks[0].id, { silent: true });
@@ -176,6 +192,7 @@ class CorrecaoController implements vscode.Disposable {
 		await this.refreshTasks();
 		this.viewProvider?.show(true);
 		this.viewProvider?.sendState(this.getState());
+		await this.openPreview();
 	}
 
 	getState(): CorrecaoState {
@@ -209,7 +226,11 @@ class CorrecaoController implements vscode.Disposable {
 			text,
 			status: this.status,
 			buildError: this.buildError,
-			buildLogPath: this.buildLogPath
+			buildLogPath: this.buildLogPath,
+			buildOutDir: this.buildOutDir,
+			buildDetails: this.buildDetails,
+			preview: this.previewInfo,
+			runtimeInfo: this.runtimeInfo
 		};
 	}
 
@@ -245,6 +266,13 @@ class CorrecaoController implements vscode.Disposable {
 				return;
 			case 'openBuildLog':
 				await this.openBuildLog();
+				return;
+			case 'openBuildFolder':
+				await this.openBuildFolder();
+				return;
+			case 'retryBuild':
+				await this.scheduleBuild();
+				await this.openPreview();
 				return;
 			default:
 				return;
@@ -328,6 +356,30 @@ class CorrecaoController implements vscode.Disposable {
 		this.tasks = await listDiagramadorTasks(this.diagramadorBaseDir);
 	}
 
+	private async resolveRuntimePaths(): Promise<void> {
+		const runtimeResolution = await resolveCoRuntimeDir({
+			featureName: 'correcao',
+			appName: vscode.env.appName,
+			configuredBaseDir: vscode.workspace.getConfiguration('co.runtime').get<string>('baseDir'),
+			envBaseDir: process.env.CO_RUNTIME_BASE_DIR,
+			isSnapTectonic: await isSnapTectonicCommand(),
+			platform: process.platform
+		});
+		this.previewRuntimeBaseDir = runtimeResolution.baseDir;
+		this.runtimeInfo = {
+			baseDir: runtimeResolution.baseDir,
+			outDir: path.join(runtimeResolution.baseDir, PREVIEW_DIR_NAME),
+			relocated: runtimeResolution.relocated,
+			reason: formatRuntimeReason(runtimeResolution.reason),
+			requestedBaseDir: runtimeResolution.requestedRootDir
+		};
+		if (runtimeResolution.relocated) {
+			this.output.appendLine(`[${new Date().toISOString()}] Runtime realocado: ${runtimeResolution.requestedRootDir} -> ${runtimeResolution.baseDir}`);
+		}
+		await fs.mkdir(this.previewRuntimeBaseDir, { recursive: true });
+		await pruneRuntimeChildren(this.previewRuntimeBaseDir, { maxAgeDays: 14, maxEntries: 50 });
+	}
+
 	async selectTask(taskId: string, options?: { silent?: boolean }): Promise<void> {
 		if (!taskId || this.selectedTaskId === taskId) {
 			if (!options?.silent) {
@@ -346,6 +398,11 @@ class CorrecaoController implements vscode.Disposable {
 		const field = this.fields.find(entry => entry.key === this.selectedFieldKey);
 		this.selectedFieldType = field?.type ?? 'string';
 		await this.loadCorrectionsForField();
+		this.buildError = undefined;
+		this.buildLogPath = undefined;
+		this.buildDetails = undefined;
+		this.buildOutDir = this.getPreviewOutDir();
+		this.previewInfo = { state: 'waiting_for_build', message: 'Aguardando geracao do PDF corrigido.', path: this.getPreviewPdfPath() };
 		if (!options?.silent) {
 			this.viewProvider?.sendState(this.getState());
 		}
@@ -565,7 +622,8 @@ class CorrecaoController implements vscode.Disposable {
 			...(this.currentProject.data ?? {}),
 			[this.selectedFieldKey]: nextValue
 		};
-		const outDir = path.join(this.correctionsBaseDir, this.selectedTaskId, PREVIEW_DIR_NAME);
+		const outDir = this.getPreviewOutDir();
+		this.buildOutDir = outDir;
 		await fs.mkdir(outDir, { recursive: true });
 		this.buildService.schedule({
 			template,
@@ -579,20 +637,34 @@ class CorrecaoController implements vscode.Disposable {
 		this.status = status;
 		if (status.state === 'building') {
 			this.buildError = undefined;
+			this.buildDetails = undefined;
 		}
 		this.viewProvider?.sendState(this.getState());
+		if (status.state === 'building' || status.state === 'error') {
+			void this.openPreview();
+		}
 	}
 
 	private handleBuildResult(result: TemplateBuildResult) {
+		const description = describeTemplateBuildFailure(result);
 		this.buildLogPath = result.logPath;
+		this.buildOutDir = result.diagnostics?.outDir ?? this.getPreviewOutDir();
+		this.buildDetails = {
+			failureCode: result.failureCode,
+			detail: description.detail,
+			technicalDetails: description.technicalDetails
+		};
 		if (result.ok) {
 			this.buildError = undefined;
 			this.viewProvider?.sendState(this.getState());
-			void this.previewManager.open(path.join(path.dirname(result.pdfPath), PREVIEW_PDF_NAME));
+			void this.openPreview();
 			return;
 		}
-		this.buildError = result.friendly || 'Falha ao gerar o PDF.';
-		this.output.appendLine(`[${new Date().toISOString()}] ${result.friendly}`);
+		this.buildError = description.summary;
+		this.output.appendLine(`[${new Date().toISOString()}] ${description.summary}`);
+		if (description.detail) {
+			this.output.appendLine(description.detail);
+		}
 		if (result.stdout) {
 			this.output.appendLine(result.stdout);
 		}
@@ -600,6 +672,7 @@ class CorrecaoController implements vscode.Disposable {
 			this.output.appendLine(result.stderr);
 		}
 		this.viewProvider?.sendState(this.getState());
+		void this.openPreview();
 	}
 
 	private async openBuildLog(): Promise<void> {
@@ -609,6 +682,15 @@ class CorrecaoController implements vscode.Disposable {
 		}
 		const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(this.buildLogPath));
 		await vscode.window.showTextDocument(doc, { preview: true, viewColumn: vscode.ViewColumn.Beside });
+	}
+
+	private async openBuildFolder(): Promise<void> {
+		const targetDir = this.buildOutDir ?? this.getPreviewOutDir();
+		if (!targetDir || !await fileExists(targetDir)) {
+			await vscode.window.showWarningMessage('Pasta de saida nao encontrada.');
+			return;
+		}
+		await vscode.env.openExternal(vscode.Uri.file(targetDir));
 	}
 
 	private async resolveBundlePath() {
@@ -642,6 +724,54 @@ class CorrecaoController implements vscode.Disposable {
 		return template;
 	}
 
+	private getPreviewOutDir(): string {
+		if (!this.selectedTaskId) {
+			return path.join(this.previewRuntimeBaseDir, PREVIEW_DIR_NAME);
+		}
+		return path.join(this.previewRuntimeBaseDir, this.selectedTaskId, PREVIEW_DIR_NAME);
+	}
+
+	private getPreviewPdfPath(): string {
+		return path.join(this.getPreviewOutDir(), PREVIEW_PDF_NAME);
+	}
+
+	private async openPreview(): Promise<void> {
+		const previewPath = this.getPreviewPdfPath();
+		const result = await this.resolvePreview(previewPath);
+		this.previewInfo = toCorrecaoPreviewInfo(result, previewPath);
+		this.viewProvider?.sendState(this.getState());
+	}
+
+	private async resolvePreview(previewPath: string): Promise<PreviewOpenResult> {
+		if (!this.selectedTaskId) {
+			return this.previewManager.showStatus({
+				state: 'idle',
+				title: 'Correcao Preview',
+				message: 'Selecione uma tarefa para gerar o PDF.',
+				detail: 'Escolha uma tarefa e um campo de texto para iniciar a correcao.'
+			});
+		}
+		if (this.status.state === 'building') {
+			return this.previewManager.showStatus({
+				state: 'waiting_for_build',
+				title: 'Correcao Preview',
+				message: 'Gerando PDF corrigido...',
+				detail: previewPath,
+				path: previewPath
+			});
+		}
+		if (this.buildError) {
+			return this.previewManager.showStatus({
+				state: 'build_error',
+				title: 'Correcao Preview',
+				message: this.buildError,
+				detail: [this.buildDetails?.detail, previewPath].filter(Boolean).join('\n\n'),
+				path: previewPath
+			});
+		}
+		return this.previewManager.open(previewPath);
+	}
+
 	dispose(): void {
 		this.buildService.dispose();
 		this.previewManager.dispose();
@@ -649,7 +779,18 @@ class CorrecaoController implements vscode.Disposable {
 	}
 }
 
-function resolveDiagramadorBaseDir(context: vscode.ExtensionContext): string {
+function toCorrecaoPreviewInfo(result: PreviewOpenResult, previewPath: string): CorrecaoPreviewInfo {
+	return {
+		state: result.state,
+		modeUsed: result.modeUsed,
+		reasonCode: result.reasonCode,
+		message: result.message,
+		details: result.details,
+		path: previewPath
+	};
+}
+
+function resolveDiagramadorStorageBaseDir(context: vscode.ExtensionContext): string {
 	const override = (process.env.CO_SAVE_DIR ?? '').trim();
 	if (override) {
 		return override;
@@ -893,4 +1034,41 @@ async function fileExists(filePath: string): Promise<boolean> {
 
 function isPlainObject(value: any): value is Record<string, any> {
 	return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+async function isSnapTectonicCommand(): Promise<boolean> {
+	const configured = (process.env.TECTONIC_PATH ?? '').trim();
+	if (configured.includes('/snap/')) {
+		return true;
+	}
+	const resolved = await resolveExecutableOnPath('tectonic');
+	return resolved.includes('/snap/');
+}
+
+async function resolveExecutableOnPath(binaryName: string): Promise<string> {
+	if (path.isAbsolute(binaryName)) {
+		return binaryName;
+	}
+	const searchPath = process.env.PATH ?? '';
+	for (const segment of searchPath.split(path.delimiter)) {
+		const candidate = path.join(segment, binaryName);
+		try {
+			await fs.access(candidate);
+			return candidate;
+		} catch {
+			// keep scanning
+		}
+	}
+	return binaryName;
+}
+
+function formatRuntimeReason(reason: CoRuntimeRelocationReason | undefined): string | undefined {
+	switch (reason) {
+		case 'hidden_path_under_snap':
+			return 'Runtime realocado para evitar compilacao em diretorio oculto com o Tectonic Snap.';
+		case 'tmp_path_under_snap':
+			return 'Runtime realocado para evitar compilacao em diretorio temporario com o Tectonic Snap.';
+		default:
+			return undefined;
+	}
 }

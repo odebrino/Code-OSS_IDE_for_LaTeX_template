@@ -5,6 +5,7 @@
 
 import { ChildProcess, spawn } from 'child_process';
 import crypto from 'crypto';
+import { constants as fsConstants } from 'fs';
 import fs from 'fs/promises';
 import os from 'os';
 import path from 'path';
@@ -64,6 +65,41 @@ export type TemplateBuildStatus = {
 	message?: string;
 };
 
+export type BuildFailureCode =
+	| 'tectonic_not_found'
+	| 'tectonic_spawn_error'
+	| 'input_unreadable'
+	| 'outdir_unreadable'
+	| 'outdir_unwritable'
+	| 'bundle_unreadable'
+	| 'asset_sync_error'
+	| 'latex_compile_error'
+	| 'pdf_missing_after_success'
+	| 'unknown_build_error';
+
+export type TemplateBuildDiagnostics = {
+	command: string;
+	commandPath?: string;
+	args: string[];
+	cwd: string;
+	texPath: string;
+	texPathReal?: string;
+	dataTexPath?: string;
+	dataTexPathReal?: string;
+	outDir: string;
+	outDirReal?: string;
+	bundlePath?: string;
+	bundlePathReal?: string;
+	assetsDir?: string;
+	assetsDirReal?: string;
+	stdoutTail?: string;
+	stderrTail?: string;
+	platform: NodeJS.Platform;
+	isSnapTectonic: boolean;
+	storageBaseDir: string;
+	storageBaseDirReal?: string;
+};
+
 export type TemplateBuildResult = {
 	ok: boolean;
 	stdout: string;
@@ -73,7 +109,11 @@ export type TemplateBuildResult = {
 	pdfPath: string;
 	logPath: string;
 	texPath: string;
+	failureCode?: BuildFailureCode;
+	diagnostics?: TemplateBuildDiagnostics;
 };
+
+type InternalBuildResult = Omit<TemplateBuildResult, 'pdfPath' | 'logPath' | 'texPath'>;
 
 export type TemplateBuildRequest = {
 	template: TemplatePackage;
@@ -85,6 +125,12 @@ export type TemplateBuildRequest = {
 export type BuildPreviewOptions = {
 	onProcess?: (child: ChildProcess) => void;
 	fast?: boolean;
+};
+
+export type TemplateBuildFailureDescription = {
+	summary: string;
+	detail?: string;
+	technicalDetails: Array<{ label: string; value: string }>;
 };
 
 const DEFAULT_SHARED_STORAGE = 'co-template-core';
@@ -284,71 +330,302 @@ function shouldRenderPlaceholders(source: string): boolean {
 	return /\{\{\s*[A-Za-z@]+[\s\S]*?\}\}/.test(source);
 }
 
+function createTectonicArgs(bundlePath: string | undefined, outDir: string, texPath: string, options?: { fast?: boolean }): string[] {
+	const args: string[] = [];
+	if (bundlePath) {
+		args.push('--bundle', bundlePath);
+	}
+	if (options?.fast) {
+		args.push('--reruns', '0', '--chatter', 'minimal');
+	}
+	args.push('--outdir', outDir, texPath);
+	return args;
+}
+
+async function createTemplateBuildDiagnostics(input: {
+	command: string;
+	args: string[];
+	cwd: string;
+	texPath: string;
+	dataTexPath?: string;
+	outDir: string;
+	bundlePath?: string;
+	assetsDir?: string;
+	storageBaseDir: string;
+}): Promise<TemplateBuildDiagnostics> {
+	const commandPath = await resolveCommandPath(input.command);
+	return {
+		command: input.command,
+		commandPath,
+		args: [...input.args],
+		cwd: input.cwd,
+		texPath: input.texPath,
+		texPathReal: await realpathSafe(input.texPath),
+		dataTexPath: input.dataTexPath,
+		dataTexPathReal: await realpathSafe(input.dataTexPath),
+		outDir: input.outDir,
+		outDirReal: await realpathSafe(input.outDir),
+		bundlePath: input.bundlePath,
+		bundlePathReal: await realpathSafe(input.bundlePath),
+		assetsDir: input.assetsDir,
+		assetsDirReal: await realpathSafe(input.assetsDir),
+		platform: process.platform,
+		isSnapTectonic: isSnapCommand(commandPath ?? input.command),
+		storageBaseDir: input.storageBaseDir,
+		storageBaseDirReal: await realpathSafe(input.storageBaseDir)
+	};
+}
+
+async function refreshDiagnosticsPaths(diagnostics: TemplateBuildDiagnostics): Promise<void> {
+	diagnostics.texPathReal = await realpathSafe(diagnostics.texPath);
+	diagnostics.dataTexPathReal = await realpathSafe(diagnostics.dataTexPath);
+	diagnostics.outDirReal = await realpathSafe(diagnostics.outDir);
+	diagnostics.bundlePathReal = await realpathSafe(diagnostics.bundlePath);
+	diagnostics.assetsDirReal = await realpathSafe(diagnostics.assetsDir);
+	diagnostics.storageBaseDirReal = await realpathSafe(diagnostics.storageBaseDir);
+	diagnostics.commandPath = diagnostics.commandPath ?? await resolveCommandPath(diagnostics.command);
+	diagnostics.isSnapTectonic = isSnapCommand(diagnostics.commandPath ?? diagnostics.command);
+}
+
+async function runBuildPreflight(diagnostics: TemplateBuildDiagnostics): Promise<InternalBuildResult | undefined> {
+	await refreshDiagnosticsPaths(diagnostics);
+	if (isSnapPathRestriction(diagnostics, diagnostics.texPathReal ?? diagnostics.texPath)) {
+		return {
+			ok: false,
+			stdout: '',
+			stderr: `Snap restriction detected for input file: ${diagnostics.texPathReal ?? diagnostics.texPath}`,
+			friendly: formatFriendlyBuildError('input_unreadable', diagnostics),
+			notFound: false,
+			failureCode: 'input_unreadable',
+			diagnostics
+		};
+	}
+	if (isSnapPathRestriction(diagnostics, diagnostics.outDirReal ?? diagnostics.outDir)) {
+		return {
+			ok: false,
+			stdout: '',
+			stderr: `Snap restriction detected for output directory: ${diagnostics.outDirReal ?? diagnostics.outDir}`,
+			friendly: formatFriendlyBuildError('outdir_unwritable', diagnostics),
+			notFound: false,
+			failureCode: 'outdir_unwritable',
+			diagnostics
+		};
+	}
+	const texReadable = await checkAccess(diagnostics.texPath, fsConstants.R_OK);
+	if (!texReadable.ok) {
+		return {
+			ok: false,
+			stdout: '',
+			stderr: renderAccessError('main.tex', texReadable.error),
+			friendly: formatFriendlyBuildError('input_unreadable', diagnostics),
+			notFound: false,
+			failureCode: 'input_unreadable',
+			diagnostics
+		};
+	}
+	if (diagnostics.dataTexPath) {
+		const dataReadable = await checkAccess(diagnostics.dataTexPath, fsConstants.R_OK);
+		if (!dataReadable.ok) {
+			return {
+				ok: false,
+				stdout: '',
+				stderr: renderAccessError('co_data.tex', dataReadable.error),
+				friendly: formatFriendlyBuildError('input_unreadable', diagnostics),
+				notFound: false,
+				failureCode: 'input_unreadable',
+				diagnostics
+			};
+		}
+	}
+	const outReadable = await checkAccess(diagnostics.outDir, fsConstants.R_OK | fsConstants.X_OK);
+	if (!outReadable.ok) {
+		return {
+			ok: false,
+			stdout: '',
+			stderr: renderAccessError('output directory', outReadable.error),
+			friendly: formatFriendlyBuildError('outdir_unreadable', diagnostics),
+			notFound: false,
+			failureCode: 'outdir_unreadable',
+			diagnostics
+		};
+	}
+	const outWritable = await checkAccess(diagnostics.outDir, fsConstants.W_OK | fsConstants.X_OK);
+	if (!outWritable.ok) {
+		return {
+			ok: false,
+			stdout: '',
+			stderr: renderAccessError('output directory', outWritable.error),
+			friendly: formatFriendlyBuildError('outdir_unwritable', diagnostics),
+			notFound: false,
+			failureCode: 'outdir_unwritable',
+			diagnostics
+		};
+	}
+	if (diagnostics.bundlePath) {
+		const bundleReadable = await checkAccess(diagnostics.bundlePath, fsConstants.R_OK);
+		if (!bundleReadable.ok) {
+			return {
+				ok: false,
+				stdout: '',
+				stderr: renderAccessError('bundle', bundleReadable.error),
+				friendly: formatFriendlyBuildError('bundle_unreadable', diagnostics),
+				notFound: false,
+				failureCode: 'bundle_unreadable',
+				diagnostics
+			};
+		}
+	}
+	return undefined;
+}
+
 export async function buildPreview(
 	template: TemplatePackage,
 	previewData: Record<string, any>,
 	outDir: string,
 	options?: BuildPreviewOptions
 ): Promise<TemplateBuildResult> {
-	await fs.mkdir(outDir, { recursive: true });
-	const data = mergeTemplateData(template.manifest.defaults, previewData);
-	const normalized = normalizeTemplateData(data, template.manifest.schema);
-	const tex = shouldRenderPlaceholders(template.mainTex)
-		? renderTemplateNormalized(template.mainTex, normalized)
-		: template.mainTex;
 	const texPath = path.join(outDir, PREVIEW_TEX_NAME);
 	const dataTexPath = path.join(outDir, DATA_TEX_NAME);
-	const dataTex = buildCoDataTex(normalized);
-	const previousTex = await readTextFile(texPath);
-	const texChanged = previousTex !== tex;
-	if (texChanged) {
-		await fs.writeFile(texPath, tex, 'utf8');
-	}
-	const previousDataTex = await readTextFile(dataTexPath);
-	if (previousDataTex !== dataTex) {
-		await fs.writeFile(dataTexPath, dataTex, 'utf8');
-	}
-	const assetsOutDir = path.join(outDir, 'assets');
-	const assetsCachePath = path.join(outDir, '.assets-cache');
-	const assetsSync = await syncAssetsIfChanged(template.assetsDir, assetsOutDir, assetsCachePath);
 	const pdfPath = path.join(outDir, 'preview.pdf');
 	const rawPdfPath = path.join(outDir, `${path.parse(texPath).name}.pdf`);
-	const logPath = path.join(outDir, 'build.log');
+	const preferredLogPath = path.join(outDir, 'build.log');
 	const buildCachePath = path.join(outDir, '.preview-cache.json');
-	const texHash = hashText(`${tex}\n${dataTex}`);
-	const buildCache = await readBuildCache(buildCachePath);
-	const cacheHit = Boolean(buildCache
-		&& buildCache.texHash === texHash
-		&& buildCache.assetsSignature === assetsSync.signature
-		&& await fileExists(pdfPath));
-	if (cacheHit) {
-		await writeBuildLog(logPath, { ok: true, stdout: 'Cache hit.', stderr: '' });
+	const bundlePath = normalizeOptionalPath(process.env.CO_TECTONIC_BUNDLE);
+	const command = process.env.TECTONIC_PATH || 'tectonic';
+	const args = createTectonicArgs(bundlePath, outDir, texPath, options);
+	const diagnostics = await createTemplateBuildDiagnostics({
+		command,
+		args,
+		cwd: outDir,
+		texPath,
+		dataTexPath,
+		outDir,
+		bundlePath,
+		assetsDir: template.assetsDir,
+		storageBaseDir: path.dirname(outDir)
+	});
+	try {
+		await fs.mkdir(outDir, { recursive: true });
+		await refreshDiagnosticsPaths(diagnostics);
+		const data = mergeTemplateData(template.manifest.defaults, previewData);
+		const normalized = normalizeTemplateData(data, template.manifest.schema);
+		const tex = shouldRenderPlaceholders(template.mainTex)
+			? renderTemplateNormalized(template.mainTex, normalized)
+			: template.mainTex;
+		const dataTex = buildCoDataTex(normalized);
+		const previousTex = await readTextFile(texPath);
+		if (previousTex !== tex) {
+			await fs.writeFile(texPath, tex, 'utf8');
+		}
+		const previousDataTex = await readTextFile(dataTexPath);
+		if (previousDataTex !== dataTex) {
+			await fs.writeFile(dataTexPath, dataTex, 'utf8');
+		}
+		await refreshDiagnosticsPaths(diagnostics);
+		const assetsOutDir = path.join(outDir, 'assets');
+		const assetsCachePath = path.join(outDir, '.assets-cache');
+		let assetsSync: { changed: boolean; signature: string };
+		try {
+			assetsSync = await syncAssetsIfChanged(template.assetsDir, assetsOutDir, assetsCachePath);
+		} catch (err: any) {
+			const failure = finalizeBuildResult({
+				ok: false,
+				stdout: '',
+				stderr: String(err?.stack ?? err?.message ?? err),
+				friendly: formatFriendlyBuildError('asset_sync_error', diagnostics),
+				notFound: false,
+				failureCode: 'asset_sync_error',
+				diagnostics
+			});
+			const logPath = await writeBuildLog(preferredLogPath, failure);
+			return { ...failure, pdfPath, logPath, texPath };
+		}
+		const texHash = hashText(`${tex}\n${dataTex}`);
+		const buildCache = await readBuildCache(buildCachePath);
+		const cacheHit = Boolean(buildCache
+			&& buildCache.texHash === texHash
+			&& buildCache.assetsSignature === assetsSync.signature
+			&& await fileExists(pdfPath));
+		if (cacheHit) {
+			const cacheResult = finalizeBuildResult({
+				ok: true,
+				stdout: 'Cache hit.',
+				stderr: '',
+				friendly: '',
+				notFound: false,
+				diagnostics
+			});
+			const logPath = await writeBuildLog(preferredLogPath, cacheResult);
+			return {
+				...cacheResult,
+				pdfPath,
+				logPath,
+				texPath
+			};
+		}
+		const preflightFailure = await runBuildPreflight(diagnostics);
+		if (preflightFailure) {
+			const result = finalizeBuildResult(preflightFailure);
+			const logPath = await writeBuildLog(preferredLogPath, result);
+			return {
+				...result,
+				pdfPath,
+				logPath,
+				texPath
+			};
+		}
+		const result = finalizeBuildResult(await runTectonic(diagnostics, options?.onProcess, options));
+		if (result.ok) {
+			await ensurePreviewPdf(rawPdfPath, pdfPath);
+			if (!await fileExists(pdfPath)) {
+				const missingPdf = finalizeBuildResult({
+					ok: false,
+					stdout: result.stdout,
+					stderr: result.stderr,
+					friendly: formatFriendlyBuildError('pdf_missing_after_success', diagnostics),
+					notFound: false,
+					failureCode: 'pdf_missing_after_success',
+					diagnostics
+				});
+				const logPath = await writeBuildLog(preferredLogPath, missingPdf);
+				return {
+					...missingPdf,
+					pdfPath,
+					logPath,
+					texPath
+				};
+			}
+			await writeBuildCache(buildCachePath, {
+				texHash,
+				assetsSignature: assetsSync.signature
+			});
+		}
+		const logPath = await writeBuildLog(preferredLogPath, result);
 		return {
-			ok: true,
+			...result,
+			pdfPath,
+			logPath,
+			texPath
+		};
+	} catch (err: any) {
+		const failureCode = classifyFsFailure(err, diagnostics) ?? 'unknown_build_error';
+		const failure = finalizeBuildResult({
+			ok: false,
 			stdout: '',
-			stderr: '',
-			friendly: '',
+			stderr: String(err?.stack ?? err?.message ?? err),
+			friendly: formatFriendlyBuildError(failureCode, diagnostics),
 			notFound: false,
+			failureCode,
+			diagnostics
+		});
+		const logPath = await writeBuildLog(preferredLogPath, failure);
+		return {
+			...failure,
 			pdfPath,
 			logPath,
 			texPath
 		};
 	}
-	const result = await runTectonic(texPath, outDir, options?.onProcess, options);
-	await writeBuildLog(logPath, result);
-	if (result.ok) {
-		await ensurePreviewPdf(rawPdfPath, pdfPath);
-		await writeBuildCache(buildCachePath, {
-			texHash,
-			assetsSignature: assetsSync.signature
-		});
-	}
-	return {
-		...result,
-		pdfPath,
-		logPath,
-		texPath
-	};
 }
 
 export class TemplateBuildService {
@@ -414,7 +691,7 @@ export class TemplateBuildService {
 			if (result.ok) {
 				this.options.onStatus?.({ state: 'success', message: 'PDF atualizado.' });
 			} else {
-				this.options.onStatus?.({ state: 'error', message: result.friendly });
+				this.options.onStatus?.({ state: 'error', message: describeTemplateBuildFailure(result).summary });
 			}
 			this.options.onComplete?.(result);
 		} catch (err: any) {
@@ -422,16 +699,32 @@ export class TemplateBuildService {
 				return;
 			}
 			this.currentProcess = undefined;
-			const friendly = 'Nao foi possivel gerar o PDF.';
-			this.options.onStatus?.({ state: 'error', message: friendly });
-			this.options.onComplete?.({
+			const diagnostics = await createTemplateBuildDiagnostics({
+				command: process.env.TECTONIC_PATH || 'tectonic',
+				args: createTectonicArgs(normalizeOptionalPath(process.env.CO_TECTONIC_BUNDLE), request.outDir, path.join(request.outDir, PREVIEW_TEX_NAME), { fast: request.fast }),
+				cwd: request.outDir,
+				texPath: path.join(request.outDir, PREVIEW_TEX_NAME),
+				dataTexPath: path.join(request.outDir, DATA_TEX_NAME),
+				outDir: request.outDir,
+				bundlePath: normalizeOptionalPath(process.env.CO_TECTONIC_BUNDLE),
+				assetsDir: request.template.assetsDir,
+				storageBaseDir: path.dirname(request.outDir)
+			});
+			const failure = finalizeBuildResult({
 				ok: false,
 				stdout: '',
 				stderr: String(err?.message ?? err),
-				friendly,
+				friendly: formatFriendlyBuildError('unknown_build_error', diagnostics),
 				notFound: false,
+				failureCode: 'unknown_build_error',
+				diagnostics
+			});
+			const logPath = await writeBuildLog(path.join(request.outDir, 'build.log'), failure);
+			this.options.onStatus?.({ state: 'error', message: describeTemplateBuildFailure(failure).summary });
+			this.options.onComplete?.({
+				...failure,
 				pdfPath: path.join(request.outDir, 'preview.pdf'),
-				logPath: path.join(request.outDir, 'build.log'),
+				logPath,
 				texPath: path.join(request.outDir, PREVIEW_TEX_NAME)
 			});
 		}
@@ -720,14 +1013,373 @@ async function copyDirectory(sourceDir: string, targetDir: string) {
 	}
 }
 
-async function writeBuildLog(logPath: string, result: { ok: boolean; stdout: string; stderr: string }) {
+async function writeBuildLog(logPath: string, result: InternalBuildResult): Promise<string> {
+	const content = renderBuildLog(result);
+	try {
+		await fs.mkdir(path.dirname(logPath), { recursive: true });
+		await fs.writeFile(logPath, content, 'utf8');
+		return logPath;
+	} catch {
+		const fallbackDir = await fs.mkdtemp(path.join(os.tmpdir(), 'co-template-log-'));
+		const fallbackPath = path.join(fallbackDir, 'build.log');
+		await fs.writeFile(fallbackPath, content, 'utf8');
+		return fallbackPath;
+	}
+}
+
+function renderBuildLog(result: InternalBuildResult): string {
+	const diagnostics = result.diagnostics;
 	const stamp = new Date().toISOString();
-	const lines = [
-		`[${stamp}] ${result.ok ? 'OK' : 'ERRO'}`,
-		result.stdout,
-		result.stderr
-	].filter(Boolean).join('\n');
-	await fs.writeFile(logPath, lines || 'Sem log.', 'utf8');
+	const sections: string[] = [`[${stamp}] ${result.ok ? 'OK' : 'ERRO'}`];
+	if (result.failureCode) {
+		sections.push(`failureCode: ${result.failureCode}`);
+	}
+	if (result.friendly) {
+		sections.push(`friendly: ${result.friendly}`);
+	}
+	if (diagnostics) {
+		const details = [
+			['command', diagnostics.command],
+			['commandPath', diagnostics.commandPath],
+			['args', diagnostics.args.join(' ')],
+			['cwd', diagnostics.cwd],
+			['texPath', diagnostics.texPath],
+			['texPathReal', diagnostics.texPathReal],
+			['dataTexPath', diagnostics.dataTexPath],
+			['dataTexPathReal', diagnostics.dataTexPathReal],
+			['outDir', diagnostics.outDir],
+			['outDirReal', diagnostics.outDirReal],
+			['bundlePath', diagnostics.bundlePath],
+			['bundlePathReal', diagnostics.bundlePathReal],
+			['assetsDir', diagnostics.assetsDir],
+			['assetsDirReal', diagnostics.assetsDirReal],
+			['storageBaseDir', diagnostics.storageBaseDir],
+			['storageBaseDirReal', diagnostics.storageBaseDirReal],
+			['platform', diagnostics.platform],
+			['isSnapTectonic', String(diagnostics.isSnapTectonic)]
+		].filter(([, value]) => Boolean(value));
+		if (details.length) {
+			sections.push('diagnostics:');
+			for (const [label, value] of details) {
+				sections.push(`  ${label}: ${value}`);
+			}
+		}
+	}
+	if (result.stdout) {
+		sections.push('', 'stdout:', result.stdout);
+	}
+	if (result.stderr) {
+		sections.push('', 'stderr:', result.stderr);
+	}
+	return sections.join('\n') || 'Sem log.';
+}
+
+function finalizeBuildResult(result: InternalBuildResult): InternalBuildResult {
+	const diagnostics = result.diagnostics;
+	if (diagnostics) {
+		diagnostics.stdoutTail = tailText(result.stdout);
+		diagnostics.stderrTail = tailText(result.stderr);
+	}
+	return result;
+}
+
+function tailText(value: string | undefined, maxChars = 4000): string | undefined {
+	if (!value) {
+		return undefined;
+	}
+	if (value.length <= maxChars) {
+		return value;
+	}
+	return value.slice(value.length - maxChars);
+}
+
+type AccessCheckResult = {
+	ok: boolean;
+	error?: NodeJS.ErrnoException;
+};
+
+async function checkAccess(targetPath: string | undefined, mode: number): Promise<AccessCheckResult> {
+	if (!targetPath) {
+		return { ok: false, error: Object.assign(new Error('Path ausente.'), { code: 'ENOENT' }) as NodeJS.ErrnoException };
+	}
+	try {
+		await fs.access(targetPath, mode);
+		return { ok: true };
+	} catch (err: any) {
+		return { ok: false, error: err };
+	}
+}
+
+function renderAccessError(label: string, error: NodeJS.ErrnoException | undefined): string {
+	if (!error) {
+		return `${label}: acesso negado.`;
+	}
+	return `${label}: ${error.message}`;
+}
+
+async function resolveCommandPath(command: string): Promise<string | undefined> {
+	const normalized = normalizeOptionalPath(command);
+	if (!normalized) {
+		return undefined;
+	}
+	if (path.isAbsolute(normalized) || normalized.includes(path.sep)) {
+		return await fileExists(normalized) ? normalized : undefined;
+	}
+	const pathEnv = process.env.PATH ?? '';
+	const entries = pathEnv.split(path.delimiter).filter(Boolean);
+	const extensions = process.platform === 'win32'
+		? (process.env.PATHEXT ?? '.EXE;.CMD;.BAT;.COM').split(';').filter(Boolean)
+		: [''];
+	for (const entry of entries) {
+		for (const extension of extensions) {
+			const candidate = path.join(entry, extension ? `${normalized}${extension}` : normalized);
+			if (await fileExists(candidate)) {
+				return candidate;
+			}
+		}
+	}
+	return undefined;
+}
+
+function isSnapCommand(command: string | undefined): boolean {
+	return Boolean(command && /(?:^|\/)snap(?:\/|$)/.test(command));
+}
+
+function isSnapPathRestriction(diagnostics: TemplateBuildDiagnostics, targetPath: string | undefined): boolean {
+	if (!diagnostics.isSnapTectonic || diagnostics.platform !== 'linux' || !targetPath) {
+		return false;
+	}
+	const homeDir = os.homedir();
+	return !isPathWithin(targetPath, homeDir);
+}
+
+function isPathWithin(targetPath: string, rootPath: string): boolean {
+	const normalizedRoot = path.resolve(rootPath);
+	const normalizedTarget = path.resolve(targetPath);
+	if (normalizedTarget === normalizedRoot) {
+		return true;
+	}
+	const relative = path.relative(normalizedRoot, normalizedTarget);
+	return relative !== '' && !relative.startsWith('..') && !path.isAbsolute(relative);
+}
+
+async function realpathSafe(targetPath: string | undefined): Promise<string | undefined> {
+	if (!targetPath) {
+		return undefined;
+	}
+	try {
+		return await fs.realpath(targetPath);
+	} catch {
+		return undefined;
+	}
+}
+
+function classifyFsFailure(error: any, diagnostics?: TemplateBuildDiagnostics): BuildFailureCode | undefined {
+	const code = String(error?.code ?? '');
+	const errorPath = typeof error?.path === 'string' ? error.path : '';
+	if (code === 'ENOENT' && diagnostics?.bundlePath && errorPath === diagnostics.bundlePath) {
+		return 'bundle_unreadable';
+	}
+	if (code === 'ENOENT' && diagnostics?.texPath && errorPath === diagnostics.texPath) {
+		return 'input_unreadable';
+	}
+	if ((code === 'EACCES' || code === 'EPERM') && diagnostics?.outDir && errorPath.startsWith(diagnostics.outDir)) {
+		return 'outdir_unwritable';
+	}
+	if ((code === 'EACCES' || code === 'EPERM') && diagnostics?.bundlePath && errorPath === diagnostics.bundlePath) {
+		return 'bundle_unreadable';
+	}
+	return undefined;
+}
+
+function classifyTectonicFailure(stderr: string, diagnostics: TemplateBuildDiagnostics): BuildFailureCode {
+	const message = stderr.toLowerCase();
+	if (message.includes('failed to open input file "main.tex"') || message.includes('open of primary input failed')) {
+		return 'input_unreadable';
+	}
+	if (message.includes('output directory') && message.includes('does not exist')) {
+		return 'outdir_unwritable';
+	}
+	if (message.includes('permission denied') && diagnostics.isSnapTectonic) {
+		if (isSnapPathRestriction(diagnostics, diagnostics.texPathReal ?? diagnostics.texPath)) {
+			return 'input_unreadable';
+		}
+		if (isSnapPathRestriction(diagnostics, diagnostics.outDirReal ?? diagnostics.outDir)) {
+			return 'outdir_unwritable';
+		}
+	}
+	if (message.includes('bundle') && (message.includes('permission denied') || message.includes('no such file'))) {
+		return 'bundle_unreadable';
+	}
+	return 'latex_compile_error';
+}
+
+export function describeTemplateBuildFailure(result: Pick<TemplateBuildResult, 'friendly' | 'failureCode' | 'diagnostics'>): TemplateBuildFailureDescription {
+	const diagnostics = result.diagnostics;
+	const fallbackSummary = result.friendly || 'Nao foi possivel gerar o PDF.';
+	const technicalDetails: Array<{ label: string; value: string }> = [];
+	if (result.failureCode) {
+		technicalDetails.push({ label: 'failureCode', value: result.failureCode });
+	}
+	if (diagnostics?.command) {
+		technicalDetails.push({ label: 'comando', value: diagnostics.command });
+	}
+	if (diagnostics?.commandPath) {
+		technicalDetails.push({ label: 'executavel', value: diagnostics.commandPath });
+	}
+	if (diagnostics?.texPathReal ?? diagnostics?.texPath) {
+		technicalDetails.push({ label: 'main.tex', value: diagnostics?.texPathReal ?? diagnostics?.texPath ?? '' });
+	}
+	if (diagnostics?.outDirReal ?? diagnostics?.outDir) {
+		technicalDetails.push({ label: 'saida', value: diagnostics?.outDirReal ?? diagnostics?.outDir ?? '' });
+	}
+	if (diagnostics?.bundlePathReal ?? diagnostics?.bundlePath) {
+		technicalDetails.push({ label: 'bundle', value: diagnostics?.bundlePathReal ?? diagnostics?.bundlePath ?? '' });
+	}
+	if (diagnostics?.stderrTail) {
+		technicalDetails.push({ label: 'stderr', value: diagnostics.stderrTail });
+	}
+	switch (result.failureCode) {
+		case 'tectonic_not_found':
+			return {
+				summary: 'Nao encontrei o Tectonic no ambiente atual.',
+				detail: 'Instale o Tectonic ou ajuste TECTONIC_PATH para um executavel valido.',
+				technicalDetails
+			};
+		case 'tectonic_spawn_error':
+			return {
+				summary: 'Falha ao iniciar o processo do Tectonic.',
+				detail: 'O executavel foi localizado, mas o sistema nao conseguiu inicia-lo.',
+				technicalDetails
+			};
+		case 'input_unreadable':
+			return {
+				summary: 'O Tectonic nao conseguiu ler o arquivo principal do documento.',
+				detail: buildInputUnreadableDetail(diagnostics),
+				technicalDetails
+			};
+		case 'outdir_unreadable':
+			return {
+				summary: 'O diretorio de saida do PDF nao pode ser lido.',
+				detail: buildOutDirDetail(diagnostics, 'leitura'),
+				technicalDetails
+			};
+		case 'outdir_unwritable':
+			return {
+				summary: 'O diretorio de saida do PDF nao pode ser gravado.',
+				detail: buildOutDirDetail(diagnostics, 'gravacao'),
+				technicalDetails
+			};
+		case 'bundle_unreadable':
+			return {
+				summary: 'O bundle configurado do Tectonic nao pode ser lido.',
+				detail: diagnostics?.bundlePathReal
+					? `Verifique o caminho real do bundle: ${diagnostics.bundlePathReal}.`
+					: diagnostics?.bundlePath
+						? `Verifique o caminho do bundle: ${diagnostics.bundlePath}.`
+						: 'Revise co.tectonic.bundlePath ou CO_TECTONIC_BUNDLE.',
+				technicalDetails
+			};
+		case 'asset_sync_error':
+			return {
+				summary: 'Falha ao sincronizar os assets do template antes da compilacao.',
+				detail: 'Verifique se os arquivos do template estao acessiveis e se o diretorio de saida aceita copia.',
+				technicalDetails
+			};
+		case 'latex_compile_error':
+			return {
+				summary: 'O PDF nao foi gerado porque o LaTeX falhou durante a compilacao.',
+				detail: 'Abra o log para ver o erro TeX detalhado e a linha que quebrou a compilacao.',
+				technicalDetails
+			};
+		case 'pdf_missing_after_success':
+			return {
+				summary: 'O Tectonic terminou sem erro, mas o PDF esperado nao apareceu.',
+				detail: 'Verifique o log e o diretorio de saida; isso normalmente indica problema de permissao, cache ou arquivo movido.',
+				technicalDetails
+			};
+		case 'unknown_build_error':
+		default:
+			return {
+				summary: fallbackSummary,
+				detail: 'Abra o log completo para inspecionar o erro bruto e os caminhos reais usados no build.',
+				technicalDetails
+			};
+	}
+}
+
+function buildInputUnreadableDetail(diagnostics?: TemplateBuildDiagnostics): string {
+	const target = diagnostics?.texPathReal ?? diagnostics?.texPath;
+	if (!target) {
+		return 'Verifique permissao de leitura no main.tex gerado.';
+	}
+	if (isSnapPathRestriction(diagnostics ?? {
+		command: '',
+		args: [],
+		cwd: '',
+		texPath: '',
+		outDir: '',
+		platform: process.platform,
+		isSnapTectonic: false,
+		storageBaseDir: ''
+	}, target)) {
+		return `O caminho real de main.tex resolve para "${target}", fora do home visivel para o Tectonic via Snap. Revise symlink, mount externo ou CO_SAVE_DIR.`;
+	}
+	return `Verifique permissao de leitura no main.tex em "${target}". ACL, owner, symlink e mount podem causar esse erro.`;
+}
+
+function buildOutDirDetail(diagnostics: TemplateBuildDiagnostics | undefined, action: 'leitura' | 'gravacao'): string {
+	const target = diagnostics?.outDirReal ?? diagnostics?.outDir;
+	if (!target) {
+		return `Verifique permissao de ${action} no diretorio de saida.`;
+	}
+	if (isSnapPathRestriction(diagnostics ?? {
+		command: '',
+		args: [],
+		cwd: '',
+		texPath: '',
+		outDir: '',
+		platform: process.platform,
+		isSnapTectonic: false,
+		storageBaseDir: ''
+	}, target)) {
+		return `O caminho real do diretorio de saida resolve para "${target}", fora do home visivel para o Tectonic via Snap. Revise symlink, mount externo ou CO_SAVE_DIR.`;
+	}
+	return `Verifique permissao de ${action} em "${target}".`;
+}
+
+function formatFriendlyBuildError(failureCode: BuildFailureCode, diagnostics?: TemplateBuildDiagnostics): string {
+	switch (failureCode) {
+		case 'tectonic_not_found':
+			return 'Nao encontrei o Tectonic. Instale o Tectonic para gerar o PDF.';
+		case 'tectonic_spawn_error':
+			return 'Falha ao iniciar o Tectonic. Verifique o executavel configurado.';
+		case 'input_unreadable':
+			return diagnostics?.texPathReal ?? diagnostics?.texPath
+				? `O Tectonic nao conseguiu ler o arquivo principal do documento: ${diagnostics?.texPathReal ?? diagnostics?.texPath}.`
+				: 'O Tectonic nao conseguiu ler o arquivo principal do documento.';
+		case 'outdir_unreadable':
+			return diagnostics?.outDirReal ?? diagnostics?.outDir
+				? `O diretorio de saida nao pode ser lido: ${diagnostics?.outDirReal ?? diagnostics?.outDir}.`
+				: 'O diretorio de saida do PDF nao pode ser lido.';
+		case 'outdir_unwritable':
+			return diagnostics?.outDirReal ?? diagnostics?.outDir
+				? `O diretorio de saida nao pode ser gravado: ${diagnostics?.outDirReal ?? diagnostics?.outDir}.`
+				: 'O diretorio de saida do PDF nao pode ser gravado.';
+		case 'bundle_unreadable':
+			return diagnostics?.bundlePathReal ?? diagnostics?.bundlePath
+				? `O bundle do Tectonic nao pode ser lido: ${diagnostics?.bundlePathReal ?? diagnostics?.bundlePath}.`
+				: 'O bundle configurado do Tectonic nao pode ser lido.';
+		case 'asset_sync_error':
+			return 'Falha ao preparar os assets do template antes da compilacao.';
+		case 'latex_compile_error':
+			return 'O PDF nao foi gerado porque a compilacao LaTeX falhou.';
+		case 'pdf_missing_after_success':
+			return 'O build terminou sem erro, mas o PDF esperado nao foi encontrado.';
+		case 'unknown_build_error':
+		default:
+			return 'Nao foi possivel gerar o PDF.';
+	}
 }
 
 function normalizeOptionalPath(value: string | undefined): string | undefined {
@@ -789,45 +1441,47 @@ async function findBundleInDir(dir: string, depth: number): Promise<string | und
 }
 
 async function runTectonic(
-	texPath: string,
-	outDir: string,
+	diagnostics: TemplateBuildDiagnostics,
 	onProcess?: (child: ChildProcess) => void,
 	options?: { fast?: boolean }
-): Promise<{ ok: boolean; stdout: string; stderr: string; friendly: string; notFound: boolean }> {
+): Promise<InternalBuildResult> {
 	return new Promise(resolve => {
 		let stdout = '';
 		let stderr = '';
-		const cmd = process.env.TECTONIC_PATH || 'tectonic';
-		const args: string[] = [];
-		const bundle = process.env.CO_TECTONIC_BUNDLE;
-		if (bundle) {
-			args.push('--bundle', bundle);
-		}
-		if (options?.fast) {
-			args.push('--reruns', '0', '--chatter', 'minimal');
-		}
-		args.push('--outdir', outDir, texPath);
-		const child = spawn(cmd, args, { cwd: outDir, shell: process.platform === 'win32' });
+		const args = diagnostics.args.length
+			? diagnostics.args
+			: createTectonicArgs(diagnostics.bundlePath, diagnostics.outDir, diagnostics.texPath, options);
+		const command = diagnostics.commandPath ?? diagnostics.command;
+		const child = spawn(command, args, { cwd: diagnostics.cwd, shell: process.platform === 'win32' });
 		onProcess?.(child);
 		child.stdout.on('data', (data: Buffer) => { stdout += data.toString(); });
 		child.stderr.on('data', (data: Buffer) => { stderr += data.toString(); });
 		child.on('error', (err: any) => {
 			const notFound = err?.code === 'ENOENT';
-			const friendly = notFound
-				? 'Nao encontrei o Tectonic. Instale o Tectonic para gerar o PDF.'
-				: 'Erro ao executar o Tectonic.';
-			resolve({ ok: false, stdout, stderr: `${stderr}\n${err?.message ?? ''}`, friendly, notFound });
+			const failureCode: BuildFailureCode = notFound ? 'tectonic_not_found' : 'tectonic_spawn_error';
+			resolve({
+				ok: false,
+				stdout,
+				stderr: `${stderr}\n${err?.message ?? ''}`.trim(),
+				friendly: formatFriendlyBuildError(failureCode, diagnostics),
+				notFound,
+				failureCode,
+				diagnostics
+			});
 		});
 		child.on('close', (code: number | null) => {
 			if (code === 0) {
-				resolve({ ok: true, stdout, stderr, friendly: '', notFound: false });
+				resolve({ ok: true, stdout, stderr, friendly: '', notFound: false, diagnostics });
 			} else {
+				const failureCode = classifyTectonicFailure(stderr, diagnostics);
 				resolve({
 					ok: false,
 					stdout,
 					stderr,
-					friendly: 'Nao foi possivel gerar o PDF. Verifique a instalacao.',
-					notFound: false
+					friendly: formatFriendlyBuildError(failureCode, diagnostics),
+					notFound: false,
+					failureCode,
+					diagnostics
 				});
 			}
 		});

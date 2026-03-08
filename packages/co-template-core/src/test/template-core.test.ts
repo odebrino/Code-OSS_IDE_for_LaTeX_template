@@ -8,6 +8,7 @@ import * as fs from 'fs/promises';
 import * as os from 'os';
 import * as path from 'path';
 import {
+	describeTemplateBuildFailure,
 	TemplateManifest,
 	TemplatePackage,
 	buildPreview,
@@ -122,6 +123,140 @@ suite('Template Core', () => {
 				delete process.env.TECTONIC_PATH;
 			} else {
 				process.env.TECTONIC_PATH = prev;
+			}
+			await fs.rm(tempRoot, { recursive: true, force: true });
+		}
+	});
+
+	test('buildPreview classifica Tectonic ausente com failureCode estruturado', async () => {
+		const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'co-template-core-'));
+		const outDir = path.join(tempRoot, 'out');
+		const assetsDir = path.join(tempRoot, 'assets');
+		await fs.mkdir(assetsDir, { recursive: true });
+		const manifest: TemplateManifest = {
+			id: 'demo-not-found',
+			name: 'Demo',
+			version: '1.0.0',
+			description: 'Demo template',
+			entry: 'main.tex',
+			schema: [{ key: 'Title', type: 'string', label: 'Title' }]
+		};
+		const template: TemplatePackage = {
+			manifest,
+			dir: tempRoot,
+			entryPath: path.join(tempRoot, 'main.tex'),
+			assetsDir,
+			mainTex: String.raw`\\documentclass{article}\\begin{document}{{Title}}\\end{document}`,
+			previewData: {},
+			readOnly: false
+		};
+		const prev = process.env.TECTONIC_PATH;
+		process.env.TECTONIC_PATH = '__missing_tectonic__';
+		try {
+			const result = await buildPreview(template, { Title: 'Teste' }, outDir);
+			assert.strictEqual(result.ok, false);
+			assert.strictEqual(result.failureCode, 'tectonic_not_found');
+			assert.match(result.friendly, /Tectonic/);
+			assert.ok(result.diagnostics?.command);
+			assert.ok(result.logPath.endsWith('build.log'));
+		} finally {
+			if (prev === undefined) {
+				delete process.env.TECTONIC_PATH;
+			} else {
+				process.env.TECTONIC_PATH = prev;
+			}
+			await fs.rm(tempRoot, { recursive: true, force: true });
+		}
+	});
+
+	test('buildPreview classifica bundle ilegivel antes do spawn', async () => {
+		const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'co-template-core-'));
+		const outDir = path.join(tempRoot, 'out');
+		const assetsDir = path.join(tempRoot, 'assets');
+		await fs.mkdir(assetsDir, { recursive: true });
+		const manifest: TemplateManifest = {
+			id: 'demo-bundle',
+			name: 'Demo',
+			version: '1.0.0',
+			description: 'Demo template',
+			entry: 'main.tex',
+			schema: []
+		};
+		const template: TemplatePackage = {
+			manifest,
+			dir: tempRoot,
+			entryPath: path.join(tempRoot, 'main.tex'),
+			assetsDir,
+			mainTex: String.raw`\\documentclass{article}\\begin{document}Teste\\end{document}`,
+			previewData: {},
+			readOnly: false
+		};
+		const prevTectonic = process.env.TECTONIC_PATH;
+		const prevBundle = process.env.CO_TECTONIC_BUNDLE;
+		process.env.TECTONIC_PATH = '__missing_tectonic__';
+		process.env.CO_TECTONIC_BUNDLE = path.join(tempRoot, 'missing.bundle');
+		try {
+			const result = await buildPreview(template, {}, outDir);
+			assert.strictEqual(result.ok, false);
+			assert.strictEqual(result.failureCode, 'bundle_unreadable');
+			assert.match(result.friendly, /bundle/i);
+		} finally {
+			if (prevTectonic === undefined) {
+				delete process.env.TECTONIC_PATH;
+			} else {
+				process.env.TECTONIC_PATH = prevTectonic;
+			}
+			if (prevBundle === undefined) {
+				delete process.env.CO_TECTONIC_BUNDLE;
+			} else {
+				process.env.CO_TECTONIC_BUNDLE = prevBundle;
+			}
+			await fs.rm(tempRoot, { recursive: true, force: true });
+		}
+	});
+
+	test('buildPreview classifica main.tex ilegivel com input_unreadable', async () => {
+		if (process.platform === 'win32') {
+			return;
+		}
+		const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'co-template-core-'));
+		const outDir = path.join(tempRoot, 'out');
+		const assetsDir = path.join(tempRoot, 'assets');
+		await fs.mkdir(outDir, { recursive: true });
+		await fs.mkdir(assetsDir, { recursive: true });
+		const manifest: TemplateManifest = {
+			id: 'demo-input',
+			name: 'Demo',
+			version: '1.0.0',
+			description: 'Demo template',
+			entry: 'main.tex',
+			schema: []
+		};
+		const template: TemplatePackage = {
+			manifest,
+			dir: tempRoot,
+			entryPath: path.join(tempRoot, 'main.tex'),
+			assetsDir,
+			mainTex: String.raw`\\documentclass{article}\\begin{document}Teste\\end{document}`,
+			previewData: {},
+			readOnly: false
+		};
+		const previousUmask = process.umask(0o444);
+		const prevTectonic = process.env.TECTONIC_PATH;
+		process.env.TECTONIC_PATH = '__missing_tectonic__';
+		try {
+			const result = await buildPreview(template, {}, outDir);
+			assert.strictEqual(result.ok, false);
+			assert.strictEqual(result.failureCode, 'input_unreadable');
+			assert.match(result.friendly, /arquivo principal/i);
+			const description = describeTemplateBuildFailure(result);
+			assert.match(description.summary, /arquivo principal/i);
+		} finally {
+			process.umask(previousUmask);
+			if (prevTectonic === undefined) {
+				delete process.env.TECTONIC_PATH;
+			} else {
+				process.env.TECTONIC_PATH = prevTectonic;
 			}
 			await fs.rm(tempRoot, { recursive: true, force: true });
 		}

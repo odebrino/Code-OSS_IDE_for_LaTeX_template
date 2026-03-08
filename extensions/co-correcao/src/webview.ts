@@ -12,6 +12,29 @@ export type CorrecaoStatus = {
 	message?: string;
 };
 
+export type CorrecaoBuildDetails = {
+	failureCode?: string;
+	detail?: string;
+	technicalDetails: Array<{ label: string; value: string }>;
+};
+
+export type CorrecaoPreviewInfo = {
+	state: 'idle' | 'waiting_for_build' | 'ready' | 'build_error' | 'preview_error' | 'unavailable';
+	modeUsed?: string;
+	reasonCode?: string;
+	message?: string;
+	details?: string[];
+	path?: string;
+};
+
+export type CorrecaoRuntimeInfo = {
+	baseDir: string;
+	outDir: string;
+	relocated: boolean;
+	reason?: string;
+	requestedBaseDir?: string;
+};
+
 export type CorrecaoTaskSummary = {
 	id: string;
 	label: string;
@@ -52,6 +75,10 @@ export type CorrecaoState = {
 	status: CorrecaoStatus;
 	buildError?: string;
 	buildLogPath?: string;
+	buildOutDir?: string;
+	buildDetails?: CorrecaoBuildDetails;
+	preview?: CorrecaoPreviewInfo;
+	runtimeInfo?: CorrecaoRuntimeInfo;
 };
 
 type MessageHandler = (message: any, webview: vscode.Webview) => void | Promise<void>;
@@ -325,8 +352,70 @@ function getCorrecaoHtml(webview: vscode.Webview, state: CorrecaoState, uiBuildI
 		color: #ef4444;
 		min-height: 18px;
 	}
+	.error-actions {
+		display: flex;
+		flex-wrap: wrap;
+		gap: 8px;
+	}
+	.tech-details {
+		border: 1px solid var(--card-border);
+		border-radius: 10px;
+		padding: 10px 12px;
+		background: rgba(0, 0, 0, 0.08);
+	}
+	.tech-details summary {
+		cursor: pointer;
+		font-size: 12px;
+		color: var(--muted);
+	}
+	.tech-list {
+		display: grid;
+		gap: 8px;
+		margin-top: 10px;
+	}
+	.tech-item {
+		display: grid;
+		gap: 4px;
+	}
+	.tech-label {
+		font-size: 11px;
+		text-transform: uppercase;
+		letter-spacing: 0.08em;
+		color: var(--muted);
+	}
+	.tech-value {
+		font-family: monospace;
+		font-size: 12px;
+		white-space: pre-wrap;
+		word-break: break-word;
+	}
 	.hidden { display: none; }
 	.build-id { font-size: 11px; color: var(--muted); text-align: right; }
+	.runtime-grid {
+		display: grid;
+		grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+		gap: 8px;
+	}
+	.runtime-item {
+		padding: 10px 12px;
+		border-radius: 10px;
+		border: 1px solid var(--card-border);
+		background: rgba(0, 0, 0, 0.05);
+		display: grid;
+		gap: 4px;
+	}
+	.runtime-label {
+		font-size: 11px;
+		text-transform: uppercase;
+		letter-spacing: 0.08em;
+		color: var(--muted);
+	}
+	.runtime-value {
+		font-family: monospace;
+		font-size: 12px;
+		white-space: pre-wrap;
+		word-break: break-word;
+	}
 </style>
 </head>
 <body>
@@ -352,9 +441,30 @@ function getCorrecaoHtml(webview: vscode.Webview, state: CorrecaoState, uiBuildI
 			</div>
 			<div class="row">
 				<button id="refreshButton" class="secondary" type="button">Atualizar tarefas</button>
+				<button id="retryBuildButton" class="secondary" type="button">Tentar novamente</button>
+				<button id="openFolderButton" class="secondary" type="button">Abrir pasta</button>
 				<button id="openLogButton" class="ghost" type="button">Abrir log completo</button>
 			</div>
+			<div class="runtime-grid">
+				<div class="runtime-item">
+					<div class="runtime-label">Runtime ativo</div>
+					<div id="runtimeBaseDir" class="runtime-value">-</div>
+				</div>
+				<div class="runtime-item">
+					<div class="runtime-label">Pasta de saida</div>
+					<div id="runtimeOutDir" class="runtime-value">-</div>
+				</div>
+				<div class="runtime-item">
+					<div class="runtime-label">Realocacao</div>
+					<div id="runtimeReason" class="runtime-value">Sem realocacao automatica.</div>
+				</div>
+			</div>
 			<div id="buildError" class="error-line"></div>
+			<div id="buildErrorDetail" class="error-line"></div>
+			<details id="buildDetailsPanel" class="tech-details hidden">
+				<summary>Detalhes tecnicos</summary>
+				<div id="buildDetailsList" class="tech-list"></div>
+			</details>
 		</section>
 
 		<section class="card">
@@ -410,8 +520,16 @@ function getCorrecaoHtml(webview: vscode.Webview, state: CorrecaoState, uiBuildI
 	const addOpButton = document.getElementById('addOpButton');
 	const newRevisionButton = document.getElementById('newRevisionButton');
 	const refreshButton = document.getElementById('refreshButton');
+	const retryBuildButton = document.getElementById('retryBuildButton');
+	const openFolderButton = document.getElementById('openFolderButton');
 	const openLogButton = document.getElementById('openLogButton');
 	const buildErrorEl = document.getElementById('buildError');
+	const buildErrorDetailEl = document.getElementById('buildErrorDetail');
+	const runtimeBaseDirEl = document.getElementById('runtimeBaseDir');
+	const runtimeOutDirEl = document.getElementById('runtimeOutDir');
+	const runtimeReasonEl = document.getElementById('runtimeReason');
+	const buildDetailsPanel = document.getElementById('buildDetailsPanel');
+	const buildDetailsList = document.getElementById('buildDetailsList');
 	const formError = document.getElementById('formError');
 
 	function setState(next) {
@@ -424,7 +542,59 @@ function getCorrecaoHtml(webview: vscode.Webview, state: CorrecaoState, uiBuildI
 		statusEl.dataset.state = status.state || 'idle';
 		statusEl.textContent = status.message || (status.state === 'building' ? 'Gerando PDF...' : status.state === 'success' ? 'PDF atualizado' : status.state === 'error' ? 'Falha ao gerar' : 'Aguardando');
 		buildErrorEl.textContent = state.buildError || '';
+		buildErrorDetailEl.textContent = state.buildError ? (state.buildDetails?.detail || state.runtimeInfo?.reason || state.preview?.message || '') : '';
 		openLogButton.classList.toggle('hidden', !state.buildLogPath);
+		openFolderButton.disabled = !state.buildOutDir;
+		retryBuildButton.disabled = !state.selectedTaskId;
+		runtimeBaseDirEl.textContent = state.runtimeInfo?.baseDir || '-';
+		runtimeOutDirEl.textContent = state.runtimeInfo?.outDir || state.buildOutDir || '-';
+		runtimeReasonEl.textContent = state.runtimeInfo?.reason || 'Sem realocacao automatica.';
+		renderTechnicalDetails();
+	}
+
+	function renderTechnicalDetails() {
+		buildDetailsList.innerHTML = '';
+		const items = [];
+		if (Array.isArray(state.buildDetails?.technicalDetails)) {
+			items.push(...state.buildDetails.technicalDetails);
+		}
+		if (state.preview?.state) {
+			items.push({ label: 'previewState', value: state.preview.state });
+		}
+		if (state.preview?.modeUsed) {
+			items.push({ label: 'previewMode', value: state.preview.modeUsed });
+		}
+		if (state.preview?.reasonCode) {
+			items.push({ label: 'previewReason', value: state.preview.reasonCode });
+		}
+		if (Array.isArray(state.preview?.details) && state.preview.details.length) {
+			items.push({ label: 'previewDetails', value: state.preview.details.join('\\n\\n') });
+		}
+		if (state.preview?.path) {
+			items.push({ label: 'previewPath', value: state.preview.path });
+		}
+		if (state.runtimeInfo?.requestedBaseDir) {
+			items.push({ label: 'runtimeRequestedDir', value: state.runtimeInfo.requestedBaseDir });
+		}
+		if (!items.length) {
+			buildDetailsPanel.classList.add('hidden');
+			buildDetailsPanel.open = false;
+			return;
+		}
+		buildDetailsPanel.classList.remove('hidden');
+		items.forEach(item => {
+			const row = document.createElement('div');
+			row.className = 'tech-item';
+			const label = document.createElement('div');
+			label.className = 'tech-label';
+			label.textContent = item.label;
+			const value = document.createElement('div');
+			value.className = 'tech-value';
+			value.textContent = item.value;
+			row.appendChild(label);
+			row.appendChild(value);
+			buildDetailsList.appendChild(row);
+		});
 	}
 
 	function renderTasks() {
@@ -569,6 +739,14 @@ function getCorrecaoHtml(webview: vscode.Webview, state: CorrecaoState, uiBuildI
 
 	refreshButton.addEventListener('click', () => {
 		vscode.postMessage({ type: 'refreshTasks' });
+	});
+
+	retryBuildButton.addEventListener('click', () => {
+		vscode.postMessage({ type: 'retryBuild' });
+	});
+
+	openFolderButton.addEventListener('click', () => {
+		vscode.postMessage({ type: 'openBuildFolder' });
 	});
 
 	openLogButton.addEventListener('click', () => {

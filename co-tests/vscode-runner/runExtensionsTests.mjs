@@ -2,7 +2,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { runTests } from '@vscode/test-electron';
+import { downloadAndUnzipVSCode, runTests } from '@vscode/test-electron';
 
 const extensionName = process.argv[2];
 if (!extensionName) {
@@ -38,10 +38,19 @@ if (!fs.existsSync(workspacePath)) {
 
 const userDataDir = fs.mkdtempSync(path.join(os.tmpdir(), `co-tests-user-${extensionName}-`));
 const extensionsDir = fs.mkdtempSync(path.join(os.tmpdir(), `co-tests-ext-${extensionName}-`));
+const runtimeBaseDir = path.join(os.tmpdir(), `co-runtime-${extensionName}`);
+
+for (const key of Object.keys(process.env)) {
+	if (key === 'ELECTRON_RUN_AS_NODE' || key === 'ELECTRON_NO_ATTACH_CONSOLE' || key.startsWith('VSCODE_')) {
+		delete process.env[key];
+	}
+}
 
 const launchArgs = [
+	workspacePath,
 	`--user-data-dir=${userDataDir}`,
 	`--extensions-dir=${extensionsDir}`,
+	'--disable-extensions',
 	'--disable-telemetry',
 	'--disable-updates',
 	'--disable-workspace-trust',
@@ -50,17 +59,23 @@ const launchArgs = [
 ];
 
 try {
+	const vscodeExecutablePath = await downloadAndUnzipVSCode({ timeout: 120000 });
+
 	await runTests({
+		vscodeExecutablePath,
 		extensionDevelopmentPath,
 		extensionTestsPath,
 		launchArgs,
+		timeout: 120000,
 		extensionTestsEnv: {
 			CO_TESTING: '1',
 			TECTONIC_PATH: '__missing__',
-			CO_TEST_WORKSPACE: workspacePath
+			CO_TEST_WORKSPACE: workspacePath,
+			CO_RUNTIME_BASE_DIR: runtimeBaseDir
 		}
 	});
 } finally {
 	fs.rmSync(userDataDir, { recursive: true, force: true });
 	fs.rmSync(extensionsDir, { recursive: true, force: true });
+	fs.rmSync(runtimeBaseDir, { recursive: true, force: true });
 }

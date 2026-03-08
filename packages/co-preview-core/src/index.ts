@@ -10,6 +10,35 @@ import { spawn } from 'child_process';
 
 export type PreviewMode = 'auto' | 'pdfjs' | 'system' | 'image';
 
+export type PdfPreviewState = 'idle' | 'waiting_for_build' | 'ready' | 'build_error' | 'preview_error' | 'unavailable';
+
+export type PreviewReasonCode =
+	| 'pdf_not_found'
+	| 'pdf_unreadable'
+	| 'pdfjs_assets_missing'
+	| 'native_viewer_open_failed'
+	| 'image_fallback_failed'
+	| 'iframe_fallback_used';
+
+export type PreviewRenderMode = 'none' | 'status' | 'pdfjs' | 'custom_editor' | 'system' | 'image' | 'iframe';
+
+export type PreviewOpenResult = {
+	ok: boolean;
+	modeUsed: PreviewRenderMode;
+	reasonCode?: PreviewReasonCode;
+	message: string;
+	details: string[];
+	state: PdfPreviewState;
+};
+
+export type PdfPreviewStatus = {
+	state: PdfPreviewState;
+	message: string;
+	detail?: string;
+	title?: string;
+	path?: string;
+};
+
 export type PdfJsPaths = {
 	root: string;
 	pdfJsPath: string;
@@ -58,17 +87,51 @@ export class PdfPreviewManager implements vscode.Disposable {
 		this.output.appendLine(`[${new Date().toISOString()}] Preview mode: ${this.previewMode}${this.preferPdfJs ? ' (prefer pdfjs)' : ''}`);
 	}
 
-	async open(previewPdfPath: string): Promise<void> {
+	async open(previewPdfPath: string): Promise<PreviewOpenResult> {
 		if (!await fileExists(previewPdfPath)) {
-			return;
+			return this.showStatus({
+				state: 'waiting_for_build',
+				message: 'PDF ainda nao foi gerado.',
+				detail: previewPdfPath,
+				path: previewPdfPath
+			});
+		}
+		try {
+			await fs.access(previewPdfPath);
+		} catch (err: unknown) {
+			return this.showStatus({
+				state: 'preview_error',
+				message: 'O PDF existe, mas nao pode ser lido para preview.',
+				detail: `${previewPdfPath}\n${getErrorMessage(err)}`,
+				path: previewPdfPath
+			});
 		}
 		const viewPath = await this.copyForView(previewPdfPath);
-		await this.showPreview(viewPath);
+		const result = await this.showPreview(viewPath);
 		await this.cleanupOldCopies(path.dirname(previewPdfPath), [viewPath, this.lastImagePath]);
+		return result;
 	}
 
-	async refresh(previewPdfPath: string): Promise<void> {
-		await this.open(previewPdfPath);
+	async refresh(previewPdfPath: string): Promise<PreviewOpenResult> {
+		return this.open(previewPdfPath);
+	}
+
+	async showStatus(status: PdfPreviewStatus): Promise<PreviewOpenResult> {
+		const viewColumn = this.pickPreviewColumn();
+		const roots = status.path ? [vscode.Uri.file(path.dirname(status.path))] : [];
+		const panel = this.ensurePreviewPanel(viewColumn, roots);
+		panel.webview.html = this.getStatusHtml(panel.webview, status);
+		const detail = [status.detail, status.path].filter(Boolean).join('\n');
+		const result: PreviewOpenResult = {
+			ok: status.state === 'ready',
+			modeUsed: 'status',
+			reasonCode: mapStatusReason(status.state),
+			message: status.message,
+			details: detail ? [detail] : [],
+			state: status.state
+		};
+		this.output.appendLine(`[${new Date().toISOString()}] Preview status: ${status.state} - ${status.message}${detail ? ` (${detail})` : ''}`);
+		return result;
 	}
 
 	private async copyForView(previewPdfPath: string): Promise<string> {
@@ -80,12 +143,22 @@ export class PdfPreviewManager implements vscode.Disposable {
 		return viewPath;
 	}
 
-	private async showPreview(viewPath: string): Promise<void> {
+	private async showPreview(viewPath: string): Promise<PreviewOpenResult> {
 		const viewColumn = this.pickPreviewColumn();
 		const uri = vscode.Uri.file(viewPath);
+		const details: string[] = [];
 		if (this.preferPdfJs && await this.showPreviewWebviewPdfJs(viewPath, viewColumn)) {
 			this.output.appendLine(`[${new Date().toISOString()}] Preview: pdfjs webview`);
-			return;
+			return {
+				ok: true,
+				modeUsed: 'pdfjs',
+				message: 'Preview aberto com PDF.js.',
+				details,
+				state: 'ready'
+			};
+		}
+		if (this.preferPdfJs) {
+			details.push('PDF.js nao estava disponivel para o modo preferido.');
 		}
 		if (this.previewMode !== 'image') {
 			const customViewer = await this.findPdfCustomEditorViewType();
@@ -98,9 +171,17 @@ export class PdfPreviewManager implements vscode.Disposable {
 					this.panel?.dispose();
 					this.panel = undefined;
 					this.output.appendLine(`[${new Date().toISOString()}] Preview: custom editor (${customViewer})`);
-					return;
+					return {
+						ok: true,
+						modeUsed: 'custom_editor',
+						message: `Preview aberto com custom editor (${customViewer}).`,
+						details,
+						state: 'ready'
+					};
 				} catch (err: unknown) {
-					this.output.appendLine(`[${new Date().toISOString()}] Falha ao abrir viewer PDF (${customViewer}): ${getErrorMessage(err)}`);
+					const detail = `Falha ao abrir viewer PDF (${customViewer}): ${getErrorMessage(err)}`;
+					this.output.appendLine(`[${new Date().toISOString()}] ${detail}`);
+					details.push(detail);
 				}
 			}
 			const hasPdfViewer = Boolean(vscode.extensions.getExtension('vscode.pdf') || vscode.extensions.getExtension('ms-vscode.pdf'));
@@ -113,15 +194,32 @@ export class PdfPreviewManager implements vscode.Disposable {
 					this.panel?.dispose();
 					this.panel = undefined;
 					this.output.appendLine(`[${new Date().toISOString()}] Preview: vscode.open (builtin)`);
-					return;
+					return {
+						ok: true,
+						modeUsed: 'system',
+						message: 'Preview aberto com o visualizador PDF do VS Code.',
+						details,
+						state: 'ready'
+					};
 				} catch (err: unknown) {
-					this.output.appendLine(`[${new Date().toISOString()}] Falha ao abrir preview: ${getErrorMessage(err)}`);
+					const detail = `Falha ao abrir preview nativo: ${getErrorMessage(err)}`;
+					this.output.appendLine(`[${new Date().toISOString()}] ${detail}`);
+					details.push(detail);
 				}
 			}
 		}
 		if (!this.preferPdfJs && await this.showPreviewWebviewPdfJs(viewPath, viewColumn)) {
 			this.output.appendLine(`[${new Date().toISOString()}] Preview: pdfjs webview (fallback)`);
-			return;
+			return {
+				ok: true,
+				modeUsed: 'pdfjs',
+				message: 'Preview aberto com PDF.js.',
+				details,
+				state: 'ready'
+			};
+		}
+		if (!this.preferPdfJs) {
+			details.push('PDF.js nao estava disponivel no fallback.');
 		}
 		if (this.previewMode !== 'system') {
 			const imagePath = await this.renderPreviewImage(viewPath);
@@ -129,11 +227,26 @@ export class PdfPreviewManager implements vscode.Disposable {
 				this.lastImagePath = imagePath;
 				await this.showPreviewWebviewImage(imagePath, viewColumn);
 				this.output.appendLine(`[${new Date().toISOString()}] Preview: png fallback`);
-				return;
+				return {
+					ok: true,
+					modeUsed: 'image',
+					message: 'Preview aberto como imagem PNG.',
+					details,
+					state: 'ready'
+				};
 			}
+			details.push('Falha ao renderizar preview por imagem com pdftoppm.');
 		}
 		await this.showPreviewWebviewPdf(viewPath, viewColumn);
 		this.output.appendLine(`[${new Date().toISOString()}] Preview: iframe fallback`);
+		return {
+			ok: true,
+			modeUsed: 'iframe',
+			reasonCode: 'iframe_fallback_used',
+			message: 'Preview aberto com fallback em iframe.',
+			details,
+			state: 'ready'
+		};
 	}
 
 	private async findPdfCustomEditorViewType(): Promise<string | undefined> {
@@ -648,6 +761,110 @@ export class PdfPreviewManager implements vscode.Disposable {
 </body>
 </html>`;
 	}
+
+	private getStatusHtml(webview: vscode.Webview, status: PdfPreviewStatus): string {
+		const csp = [
+			"default-src 'none'",
+			`style-src ${webview.cspSource} 'unsafe-inline'`
+		].join('; ');
+		const title = escapeHtml(status.title ?? this.title);
+		const message = escapeHtml(status.message);
+		const detail = escapeHtml(status.detail ?? '');
+		const statusState = escapeHtml(status.state);
+		const pathLine = status.path ? `<div class="path">${escapeHtml(status.path)}</div>` : '';
+		return `<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+<meta charset="UTF-8" />
+<meta http-equiv="Content-Security-Policy" content="${csp}" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>${title}</title>
+<style>
+	body {
+		margin: 0;
+		font-family: "Segoe UI", Arial, sans-serif;
+		background:
+			radial-gradient(circle at top left, rgba(59, 130, 246, 0.16), transparent 35%),
+			radial-gradient(circle at top right, rgba(239, 68, 68, 0.14), transparent 34%),
+			#111827;
+		color: #e5e7eb;
+		min-height: 100vh;
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		padding: 24px;
+		box-sizing: border-box;
+	}
+	.card {
+		width: min(720px, 100%);
+		border: 1px solid rgba(255, 255, 255, 0.12);
+		border-radius: 18px;
+		padding: 24px;
+		background: rgba(17, 24, 39, 0.82);
+		box-shadow: 0 24px 48px rgba(0, 0, 0, 0.35);
+	}
+	.eyebrow {
+		font-size: 11px;
+		letter-spacing: 0.18em;
+		text-transform: uppercase;
+		color: rgba(226, 232, 240, 0.72);
+	}
+	h1 {
+		margin: 10px 0 8px;
+		font-size: 24px;
+	}
+	.state {
+		display: inline-flex;
+		align-items: center;
+		gap: 8px;
+		padding: 6px 10px;
+		border-radius: 999px;
+		background: rgba(255, 255, 255, 0.05);
+		border: 1px solid rgba(255, 255, 255, 0.08);
+		font-size: 12px;
+		color: rgba(226, 232, 240, 0.88);
+	}
+	.state::before {
+		content: '';
+		width: 8px;
+		height: 8px;
+		border-radius: 50%;
+		background: #94a3b8;
+	}
+	.state[data-state="waiting_for_build"]::before { background: #f59e0b; }
+	.state[data-state="ready"]::before { background: #22c55e; }
+	.state[data-state="build_error"]::before,
+	.state[data-state="preview_error"]::before,
+	.state[data-state="unavailable"]::before { background: #ef4444; }
+	p {
+		margin: 14px 0 0;
+		line-height: 1.55;
+		color: #cbd5e1;
+	}
+	.path, pre {
+		margin-top: 14px;
+		padding: 12px 14px;
+		border-radius: 12px;
+		background: rgba(15, 23, 42, 0.88);
+		border: 1px solid rgba(255, 255, 255, 0.08);
+		font-size: 12px;
+		white-space: pre-wrap;
+		word-break: break-word;
+		color: #cbd5e1;
+	}
+</style>
+</head>
+<body>
+	<section class="card">
+		<div class="eyebrow">CO Preview</div>
+		<h1>${message}</h1>
+		<div class="state" data-state="${statusState}">${statusState}</div>
+		${detail ? `<pre>${detail}</pre>` : ''}
+		${pathLine}
+	</section>
+</body>
+</html>`;
+	}
 	/* eslint-enable local/code-no-unexternalized-strings */
 
 	private pickPreviewColumn(): vscode.ViewColumn {
@@ -688,6 +905,7 @@ export class PdfPreviewManager implements vscode.Disposable {
 function resolvePreviewMode(previewModeEnv: string | undefined, appName: string): PreviewMode {
 	const envKey = previewModeEnv || 'CO_PDF_PREVIEW_MODE';
 	const envMode = (process.env[envKey] ?? process.env.CO_TEMPLATE_GENERATOR_PREVIEW_MODE ?? '').trim().toLowerCase();
+	const configuredMode = normalizePreviewMode(vscode.workspace.getConfiguration('co.preview').get<string>('mode'));
 	if (envMode === 'pdfjs') {
 		return 'pdfjs';
 	}
@@ -700,11 +918,43 @@ function resolvePreviewMode(previewModeEnv: string | undefined, appName: string)
 	if (envMode === 'auto') {
 		return 'auto';
 	}
+	if (configuredMode) {
+		return configuredMode;
+	}
 	const lower = appName.toLowerCase();
 	if (lower.includes('dev') || lower.includes('oss')) {
 		return 'pdfjs';
 	}
 	return 'auto';
+}
+
+function normalizePreviewMode(value: string | undefined): PreviewMode | undefined {
+	switch ((value ?? '').trim().toLowerCase()) {
+		case 'pdfjs':
+			return 'pdfjs';
+		case 'system':
+		case 'custom':
+			return 'system';
+		case 'image':
+			return 'image';
+		case 'auto':
+			return 'auto';
+		default:
+			return undefined;
+	}
+}
+
+function mapStatusReason(state: PdfPreviewState): PreviewReasonCode | undefined {
+	switch (state) {
+		case 'waiting_for_build':
+			return 'pdf_not_found';
+		case 'preview_error':
+		case 'build_error':
+		case 'unavailable':
+			return 'pdf_unreadable';
+		default:
+			return undefined;
+	}
 }
 
 function shouldPreferPdfJs(appName: string): boolean {
@@ -762,4 +1012,13 @@ function getErrorMessage(error: unknown): string {
 		return error.message;
 	}
 	return String(error);
+}
+
+function escapeHtml(value: string): string {
+	return value
+		.replace(/&/g, '&amp;')
+		.replace(/</g, '&lt;')
+		.replace(/>/g, '&gt;')
+		.replace(/"/g, '&quot;')
+		.replace(/'/g, '&#39;');
 }
