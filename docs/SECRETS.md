@@ -51,13 +51,47 @@ So the extension still runs without `co-secret/`.
 Run:
 
 ```bash
-bash scripts/check-secrets.sh
+npm run co:secrets
 ```
 
 Optional hook setup:
 
 ```bash
 mkdir -p .git/hooks
-cp scripts/hooks/pre-commit.example .git/hooks/pre-commit
+cp scripts/hooks/pre-commit.example.sh .git/hooks/pre-commit
 chmod +x .git/hooks/pre-commit
 ```
+
+The example hook runs the local secret scan first and then `npm run co:test:unit`.
+
+## Environment Variables
+
+The CO surfaces use a small set of environment variables. Keep real values local and out of Git.
+
+### Optional local/runtime variables
+
+- `TECTONIC_PATH`: explicit path to the `tectonic` executable.
+- `CO_TECTONIC_BUNDLE`: explicit path to a local Tectonic bundle.
+- `CO_RUNTIME_BASE_DIR`: overrides the visible runtime base directory used by CO modules.
+- `CO_SAVE_DIR`: overrides the persistent base directory used by Diagramador/Correcao/Data Set.
+- `VSCODE_SKIP_PRELAUNCH`: skips the prelaunch bootstrap in local dev scripts.
+
+### Optional fetch/build variables
+
+- `GITHUB_TOKEN`
+- `GH_TOKEN`
+- `GITHUB_PAT`
+
+These are only needed when GitHub rate limits affect VSIX or build-related downloads.
+
+### Test-only variables
+
+- `CO_TESTING`
+- `CO_TEST_WORKSPACE`
+
+These are set by the repository test harness and should not be committed into local config files.
+
+## Local Config Files
+
+- Keep real values in `co-secret/` or in untracked `.env*` files when you need local shell helpers.
+- Do not commit populated admin lists, personal emails, tokens, or copied local overrides.

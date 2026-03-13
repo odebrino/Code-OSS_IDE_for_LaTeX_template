@@ -1,13 +1,23 @@
-name: build
+name: Build Artifacts
 
 on:
   push:
     branches: [main]
   workflow_dispatch:
 
+permissions:
+  attestations: write
+  contents: read
+  id-token: write
+
+concurrency:
+  group: build-artifacts-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 180
     continue-on-error: ${{ matrix.allow_failure }}
     strategy:
       fail-fast: false
@@ -46,7 +56,7 @@ jobs:
           cache: npm
 
       - name: Install dependencies
-        run: npm install
+        run: npm ci
 
       - name: Fetch built-in VSIX
         env:
@@ -56,8 +66,23 @@ jobs:
       - name: Build
         run: npm run gulp ${{ matrix.target }}
 
+      - name: Prepare release metadata
+        id: release_meta
+        run: node scripts/prepare-release-artifact.mjs --target ${{ matrix.target }} --skip-fetch --skip-build
+
+      - name: Attest build provenance
+        if: ${{ github.event.repository.private == false || vars.ENABLE_PRIVATE_ARTIFACT_ATTESTATION == 'true' }}
+        uses: actions/attest-build-provenance@v3
+        with:
+          subject-path: ${{ steps.release_meta.outputs.archive_path }}
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.target }}
-          path: ../VSCode-*
+          name: ${{ steps.release_meta.outputs.artifact_name }}
+          path: |
+            ${{ steps.release_meta.outputs.archive_path }}
+            ${{ steps.release_meta.outputs.checksum_path }}
+            ${{ steps.release_meta.outputs.manifest_path }}
+          if-no-files-found: error
+          retention-days: 14

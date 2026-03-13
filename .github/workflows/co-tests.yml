@@ -1,56 +1,79 @@
-name: CO Tests
+name: CO CI
 
 on:
   push:
+    branches:
+      - main
   pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: co-ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  co-tests:
+  co-ci:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Detect Package Manager
-        id: pm
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [ -f pnpm-lock.yaml ]; then
-            echo "manager=pnpm" >> "$GITHUB_OUTPUT"
-            echo "cache=pnpm" >> "$GITHUB_OUTPUT"
-            echo "install=pnpm i --frozen-lockfile" >> "$GITHUB_OUTPUT"
-          elif [ -f yarn.lock ]; then
-            echo "manager=yarn" >> "$GITHUB_OUTPUT"
-            echo "cache=yarn" >> "$GITHUB_OUTPUT"
-            echo "install=yarn install --frozen-lockfile" >> "$GITHUB_OUTPUT"
-          else
-            echo "manager=npm" >> "$GITHUB_OUTPUT"
-            echo "cache=npm" >> "$GITHUB_OUTPUT"
-            echo "install=npm ci" >> "$GITHUB_OUTPUT"
-          fi
+      - name: Secret Scan
+        run: bash scripts/check-secrets.sh
 
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version-file: .nvmrc
-          cache: ${{ steps.pm.outputs.cache }}
+          cache: npm
 
-      - name: Setup pnpm
-        if: steps.pm.outputs.manager == 'pnpm'
-        uses: pnpm/action-setup@v4
+      - name: Dependency Audit
+        run: npm run co:deps:audit
+
+      - name: Cache VS Code test runtime
+        uses: actions/cache@v4
         with:
-          version: 9
-
-      - name: Enable Corepack
-        if: steps.pm.outputs.manager != 'npm'
-        run: corepack enable
+          path: .vscode-test
+          key: ${{ runner.os }}-vscode-test-${{ hashFiles('package-lock.json', 'co-tests/vscode-runner/runExtensionsTests.mjs') }}
 
       - name: Install Dependencies
+        run: npm ci
+
+      - name: Format Check
+        run: npm run co:format:check
+
+      - name: Lint
+        run: npm run co:lint
+
+      - name: Build CO Modules
+        run: npm run co:build
+
+      - name: Typecheck Build Scripts
+        run: npm --prefix build run typecheck
+
+      - name: Run CO Smoke Tests
+        if: github.event_name == 'pull_request'
         shell: bash
         run: |
           set -euo pipefail
-          ${{ steps.pm.outputs.install }}
+          if command -v xvfb-run >/dev/null 2>&1; then
+            xvfb-run -a npm run co:test:smoke
+          else
+            npm run co:test:smoke
+          fi
 
       - name: Run CO Tests
-        run: npm run co:test
+        shell: bash
+        run: |
+          set -euo pipefail
+          if command -v xvfb-run >/dev/null 2>&1; then
+            xvfb-run -a npm test
+          else
+            npm test
+          fi
