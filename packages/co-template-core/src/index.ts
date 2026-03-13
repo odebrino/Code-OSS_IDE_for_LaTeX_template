@@ -84,6 +84,11 @@ export type TemplateValidationResult = {
 export type TemplateBuildStatus = {
 	state: 'idle' | 'building' | 'success' | 'error';
 	message?: string;
+	buildId?: string;
+	context?: TemplateBuildContext;
+	durationMs?: number;
+	cacheHit?: boolean;
+	failureCode?: BuildFailureCode;
 };
 
 export type BuildFailureCode =
@@ -98,7 +103,22 @@ export type BuildFailureCode =
 	| 'pdf_missing_after_success'
 	| 'unknown_build_error';
 
+export type TemplateBuildContext = {
+	component: string;
+	scope: string;
+	templateId?: string;
+	documentId?: string;
+	trigger?: string;
+};
+
 export type TemplateBuildDiagnostics = {
+	buildId?: string;
+	context?: TemplateBuildContext;
+	queuedAt?: string;
+	startedAt?: string;
+	finishedAt?: string;
+	durationMs?: number;
+	cacheHit?: boolean;
 	command: string;
 	commandPath?: string;
 	args: string[];
@@ -141,11 +161,16 @@ export type TemplateBuildRequest = {
 	previewData: Record<string, any>;
 	outDir: string;
 	fast?: boolean;
+	context?: TemplateBuildContext;
 };
 
 export type BuildPreviewOptions = {
 	onProcess?: (child: ChildProcess) => void;
 	fast?: boolean;
+	buildId?: string;
+	context?: TemplateBuildContext;
+	queuedAt?: number;
+	startedAt?: number;
 };
 
 export type TemplateBuildFailureDescription = {
@@ -271,10 +296,10 @@ export async function saveTemplate(storage: TemplateStorageInput, template: {
 	const templateDir = path.join(resolved.primaryDir, manifest.id);
 	const assetsDir = path.join(templateDir, 'assets');
 	await fs.mkdir(assetsDir, { recursive: true });
-	await fs.writeFile(path.join(templateDir, 'template.json'), JSON.stringify(manifest, null, 2), 'utf8');
-	await fs.writeFile(path.join(templateDir, manifest.entry), template.mainTex, 'utf8');
 	const previewData = template.previewData ?? {};
-	await fs.writeFile(path.join(templateDir, 'preview_data.json'), JSON.stringify(previewData, null, 2), 'utf8');
+	await writeTextFileAtomic(path.join(templateDir, 'template.json'), JSON.stringify(manifest, null, 2));
+	await writeTextFileAtomic(path.join(templateDir, manifest.entry), template.mainTex);
+	await writeTextFileAtomic(path.join(templateDir, 'preview_data.json'), JSON.stringify(previewData, null, 2));
 	return {
 		manifest,
 		dir: templateDir,
@@ -375,6 +400,10 @@ function createTectonicArgs(bundlePath: string | undefined, outDir: string, texP
 }
 
 async function createTemplateBuildDiagnostics(input: {
+	buildId?: string;
+	context?: TemplateBuildContext;
+	queuedAt?: number;
+	startedAt?: number;
 	command: string;
 	args: string[];
 	cwd: string;
@@ -387,6 +416,10 @@ async function createTemplateBuildDiagnostics(input: {
 }): Promise<TemplateBuildDiagnostics> {
 	const commandPath = await resolveCommandPath(input.command);
 	return {
+		buildId: input.buildId,
+		context: input.context,
+		queuedAt: toIsoStamp(input.queuedAt),
+		startedAt: toIsoStamp(input.startedAt),
 		command: input.command,
 		commandPath,
 		args: [...input.args],
@@ -516,6 +549,7 @@ export async function buildPreview(
 	outDir: string,
 	options?: BuildPreviewOptions
 ): Promise<TemplateBuildResult> {
+	const buildStart = options?.startedAt ?? Date.now();
 	const texPath = path.join(outDir, PREVIEW_TEX_NAME);
 	const dataTexPath = path.join(outDir, DATA_TEX_NAME);
 	const pdfPath = path.join(outDir, 'preview.pdf');
@@ -526,6 +560,14 @@ export async function buildPreview(
 	const command = process.env.TECTONIC_PATH || 'tectonic';
 	const args = createTectonicArgs(bundlePath, outDir, texPath, options);
 	const diagnostics = await createTemplateBuildDiagnostics({
+		buildId: options?.buildId,
+		context: options?.context ?? {
+			component: 'co-template-core',
+			scope: 'preview',
+			templateId: template.manifest.id
+		},
+		queuedAt: options?.queuedAt,
+		startedAt: buildStart,
 		command,
 		args,
 		cwd: outDir,
@@ -568,7 +610,7 @@ export async function buildPreview(
 				notFound: false,
 				failureCode: 'asset_sync_error',
 				diagnostics
-			});
+			}, { cacheHit: false });
 			const logPath = await writeBuildLog(preferredLogPath, failure);
 			return { ...failure, pdfPath, logPath, texPath };
 		}
@@ -586,7 +628,7 @@ export async function buildPreview(
 				friendly: '',
 				notFound: false,
 				diagnostics
-			});
+			}, { cacheHit: true });
 			const logPath = await writeBuildLog(preferredLogPath, cacheResult);
 			return {
 				...cacheResult,
@@ -597,7 +639,7 @@ export async function buildPreview(
 		}
 		const preflightFailure = await runBuildPreflight(diagnostics);
 		if (preflightFailure) {
-			const result = finalizeBuildResult(preflightFailure);
+			const result = finalizeBuildResult(preflightFailure, { cacheHit: false });
 			const logPath = await writeBuildLog(preferredLogPath, result);
 			return {
 				...result,
@@ -606,7 +648,7 @@ export async function buildPreview(
 				texPath
 			};
 		}
-		const result = finalizeBuildResult(await runTectonic(diagnostics, options?.onProcess, options));
+		const result = finalizeBuildResult(await runTectonic(diagnostics, options?.onProcess, options), { cacheHit: false });
 		if (result.ok) {
 			await ensurePreviewPdf(rawPdfPath, pdfPath);
 			if (!await fileExists(pdfPath)) {
@@ -618,7 +660,7 @@ export async function buildPreview(
 					notFound: false,
 					failureCode: 'pdf_missing_after_success',
 					diagnostics
-				});
+				}, { cacheHit: false });
 				const logPath = await writeBuildLog(preferredLogPath, missingPdf);
 				return {
 					...missingPdf,
@@ -649,7 +691,7 @@ export async function buildPreview(
 			notFound: false,
 			failureCode,
 			diagnostics
-		});
+		}, { cacheHit: false });
 		const logPath = await writeBuildLog(preferredLogPath, failure);
 		return {
 			...failure,
@@ -662,7 +704,7 @@ export async function buildPreview(
 
 export class TemplateBuildService {
 	private timer?: NodeJS.Timeout;
-	private pending?: TemplateBuildRequest;
+	private pending?: { request: TemplateBuildRequest; queuedAt: number };
 	private currentProcess?: ChildProcess;
 	private buildId = 0;
 	private readonly debounceMs: number;
@@ -678,7 +720,7 @@ export class TemplateBuildService {
 	}
 
 	schedule(request: TemplateBuildRequest) {
-		this.pending = request;
+		this.pending = { request, queuedAt: Date.now() };
 		this.cancelRunning();
 		if (this.timer) {
 			clearTimeout(this.timer);
@@ -697,8 +739,8 @@ export class TemplateBuildService {
 	}
 
 	private async runBuild() {
-		const request = this.pending;
-		if (!request) {
+		const pending = this.pending;
+		if (!pending) {
 			return;
 		}
 		this.pending = undefined;
@@ -706,32 +748,64 @@ export class TemplateBuildService {
 			clearTimeout(this.timer);
 			this.timer = undefined;
 		}
-		const buildId = ++this.buildId;
+		const request = pending.request;
+		const queuedAt = pending.queuedAt;
+		const buildSeq = ++this.buildId;
+		const buildId = `build-${buildSeq}`;
+		const startedAt = Date.now();
 		this.cancelRunning();
-		this.options.onStatus?.({ state: 'building', message: 'Gerando PDF...' });
+		this.options.onStatus?.({
+			state: 'building',
+			message: 'Gerando PDF...',
+			buildId,
+			context: request.context
+		});
 		try {
 			const result = await buildPreview(request.template, request.previewData, request.outDir, {
 				onProcess: (child) => {
 					this.currentProcess = child;
 				},
-				fast: request.fast
+				fast: request.fast,
+				buildId,
+				context: request.context,
+				queuedAt,
+				startedAt
 			});
-			if (buildId !== this.buildId) {
+			if (buildSeq !== this.buildId) {
 				return;
 			}
 			this.currentProcess = undefined;
 			if (result.ok) {
-				this.options.onStatus?.({ state: 'success', message: 'PDF atualizado.' });
+				this.options.onStatus?.({
+					state: 'success',
+					message: formatBuildSuccessMessage(result),
+					buildId,
+					context: request.context,
+					durationMs: result.diagnostics?.durationMs,
+					cacheHit: result.diagnostics?.cacheHit
+				});
 			} else {
-				this.options.onStatus?.({ state: 'error', message: describeTemplateBuildFailure(result).summary });
+				this.options.onStatus?.({
+					state: 'error',
+					message: describeTemplateBuildFailure(result).summary,
+					buildId,
+					context: request.context,
+					durationMs: result.diagnostics?.durationMs,
+					cacheHit: result.diagnostics?.cacheHit,
+					failureCode: result.failureCode
+				});
 			}
 			this.options.onComplete?.(result);
 		} catch (err: any) {
-			if (buildId !== this.buildId) {
+			if (buildSeq !== this.buildId) {
 				return;
 			}
 			this.currentProcess = undefined;
 			const diagnostics = await createTemplateBuildDiagnostics({
+				buildId,
+				context: request.context,
+				queuedAt,
+				startedAt,
 				command: process.env.TECTONIC_PATH || 'tectonic',
 				args: createTectonicArgs(normalizeOptionalPath(process.env.CO_TECTONIC_BUNDLE), request.outDir, path.join(request.outDir, PREVIEW_TEX_NAME), { fast: request.fast }),
 				cwd: request.outDir,
@@ -750,9 +824,17 @@ export class TemplateBuildService {
 				notFound: false,
 				failureCode: 'unknown_build_error',
 				diagnostics
-			});
+			}, { cacheHit: false });
 			const logPath = await writeBuildLog(path.join(request.outDir, 'build.log'), failure);
-			this.options.onStatus?.({ state: 'error', message: describeTemplateBuildFailure(failure).summary });
+			this.options.onStatus?.({
+				state: 'error',
+				message: describeTemplateBuildFailure(failure).summary,
+				buildId,
+				context: request.context,
+				durationMs: failure.diagnostics?.durationMs,
+				cacheHit: failure.diagnostics?.cacheHit,
+				failureCode: failure.failureCode
+			});
 			this.options.onComplete?.({
 				...failure,
 				pdfPath: path.join(request.outDir, 'preview.pdf'),
@@ -881,11 +963,9 @@ async function loadTemplateFromDir(dir: string, id: string, readOnly: boolean): 
 		return undefined;
 	}
 	const entryPath = path.join(templateDir, manifest.entry);
-	let mainTex = '';
-	try {
-		mainTex = await fs.readFile(entryPath, 'utf8');
-	} catch {
-		mainTex = '';
+	const mainTex = await readTextFile(entryPath);
+	if (mainTex === undefined) {
+		return undefined;
 	}
 	const previewPath = path.join(templateDir, 'preview_data.json');
 	const previewData = await readJsonFile<Record<string, any>>(previewPath) ?? {};
@@ -963,7 +1043,7 @@ async function readBuildCache(filePath: string): Promise<{ texHash: string; asse
 
 async function writeBuildCache(filePath: string, cache: { texHash: string; assetsSignature: string }) {
 	const content = JSON.stringify(cache);
-	await fs.writeFile(filePath, content, 'utf8');
+	await writeTextFileAtomic(filePath, content);
 }
 
 async function ensurePreviewPdf(sourcePath: string, targetPath: string): Promise<void> {
@@ -1075,7 +1155,7 @@ async function syncAssetsIfChanged(sourceDir: string, targetDir: string, cachePa
 	}
 	if (changed) {
 		await syncAssets(sourceDir, targetDir);
-		await fs.writeFile(cachePath, signature, 'utf8');
+		await writeTextFileAtomic(cachePath, signature);
 	}
 	return { changed, signature };
 }
@@ -1122,14 +1202,25 @@ async function copyDirectory(sourceDir: string, targetDir: string) {
 async function writeBuildLog(logPath: string, result: InternalBuildResult): Promise<string> {
 	const content = renderBuildLog(result);
 	try {
-		await fs.mkdir(path.dirname(logPath), { recursive: true });
-		await fs.writeFile(logPath, content, 'utf8');
+		await writeTextFileAtomic(logPath, content);
 		return logPath;
 	} catch {
 		const fallbackDir = await fs.mkdtemp(path.join(os.tmpdir(), 'co-template-log-'));
 		const fallbackPath = path.join(fallbackDir, 'build.log');
-		await fs.writeFile(fallbackPath, content, 'utf8');
+		await writeTextFileAtomic(fallbackPath, content);
 		return fallbackPath;
+	}
+}
+
+async function writeTextFileAtomic(filePath: string, content: string): Promise<void> {
+	await fs.mkdir(path.dirname(filePath), { recursive: true });
+	const tmpPath = `${filePath}.${process.pid}.${Date.now()}-${Math.random().toString(16).slice(2)}.tmp`;
+	await fs.writeFile(tmpPath, content, 'utf8');
+	try {
+		await fs.rename(tmpPath, filePath);
+	} catch {
+		await fs.unlink(filePath).catch(() => undefined);
+		await fs.rename(tmpPath, filePath);
 	}
 }
 
@@ -1145,6 +1236,17 @@ function renderBuildLog(result: InternalBuildResult): string {
 	}
 	if (diagnostics) {
 		const details = [
+			['buildId', diagnostics.buildId],
+			['component', diagnostics.context?.component],
+			['scope', diagnostics.context?.scope],
+			['templateId', diagnostics.context?.templateId],
+			['documentId', diagnostics.context?.documentId],
+			['trigger', diagnostics.context?.trigger],
+			['queuedAt', diagnostics.queuedAt],
+			['startedAt', diagnostics.startedAt],
+			['finishedAt', diagnostics.finishedAt],
+			['durationMs', typeof diagnostics.durationMs === 'number' ? String(diagnostics.durationMs) : undefined],
+			['cacheHit', typeof diagnostics.cacheHit === 'boolean' ? String(diagnostics.cacheHit) : undefined],
 			['command', diagnostics.command],
 			['commandPath', diagnostics.commandPath],
 			['args', diagnostics.args.join(' ')],
@@ -1180,9 +1282,16 @@ function renderBuildLog(result: InternalBuildResult): string {
 	return sections.join('\n') || 'Sem log.';
 }
 
-function finalizeBuildResult(result: InternalBuildResult): InternalBuildResult {
+function finalizeBuildResult(result: InternalBuildResult, options?: { cacheHit?: boolean }): InternalBuildResult {
 	const diagnostics = result.diagnostics;
 	if (diagnostics) {
+		diagnostics.cacheHit = options?.cacheHit ?? diagnostics.cacheHit ?? false;
+		diagnostics.finishedAt = new Date().toISOString();
+		const startedAt = diagnostics.startedAt ? Date.parse(diagnostics.startedAt) : Number.NaN;
+		const finishedAt = diagnostics.finishedAt ? Date.parse(diagnostics.finishedAt) : Number.NaN;
+		if (Number.isFinite(startedAt) && Number.isFinite(finishedAt)) {
+			diagnostics.durationMs = Math.max(0, finishedAt - startedAt);
+		}
 		diagnostics.stdoutTail = tailText(result.stdout);
 		diagnostics.stderrTail = tailText(result.stderr);
 	}
@@ -1324,6 +1433,27 @@ export function describeTemplateBuildFailure(result: Pick<TemplateBuildResult, '
 	const diagnostics = result.diagnostics;
 	const fallbackSummary = result.friendly || 'Nao foi possivel gerar o PDF.';
 	const technicalDetails: Array<{ label: string; value: string }> = [];
+	if (diagnostics?.buildId) {
+		technicalDetails.push({ label: 'buildId', value: diagnostics.buildId });
+	}
+	if (diagnostics?.context?.component) {
+		technicalDetails.push({ label: 'componente', value: diagnostics.context.component });
+	}
+	if (diagnostics?.context?.scope) {
+		technicalDetails.push({ label: 'escopo', value: diagnostics.context.scope });
+	}
+	if (diagnostics?.context?.templateId) {
+		technicalDetails.push({ label: 'template', value: diagnostics.context.templateId });
+	}
+	if (diagnostics?.context?.documentId) {
+		technicalDetails.push({ label: 'documento', value: diagnostics.context.documentId });
+	}
+	if (typeof diagnostics?.durationMs === 'number') {
+		technicalDetails.push({ label: 'duracaoMs', value: String(diagnostics.durationMs) });
+	}
+	if (typeof diagnostics?.cacheHit === 'boolean') {
+		technicalDetails.push({ label: 'cacheHit', value: String(diagnostics.cacheHit) });
+	}
 	if (result.failureCode) {
 		technicalDetails.push({ label: 'failureCode', value: result.failureCode });
 	}
@@ -1486,6 +1616,38 @@ function formatFriendlyBuildError(failureCode: BuildFailureCode, diagnostics?: T
 		default:
 			return 'Nao foi possivel gerar o PDF.';
 	}
+}
+
+function formatBuildSuccessMessage(result: Pick<TemplateBuildResult, 'diagnostics'>): string {
+	const cacheHit = result.diagnostics?.cacheHit;
+	const durationLabel = formatDurationMs(result.diagnostics?.durationMs);
+	if (cacheHit && durationLabel) {
+		return `PDF atualizado a partir do cache em ${durationLabel}.`;
+	}
+	if (cacheHit) {
+		return 'PDF atualizado a partir do cache.';
+	}
+	if (durationLabel) {
+		return `PDF atualizado em ${durationLabel}.`;
+	}
+	return 'PDF atualizado.';
+}
+
+function formatDurationMs(durationMs: number | undefined): string | undefined {
+	if (typeof durationMs !== 'number' || !Number.isFinite(durationMs)) {
+		return undefined;
+	}
+	if (durationMs < 1000) {
+		return `${durationMs}ms`;
+	}
+	return `${(durationMs / 1000).toFixed(durationMs >= 10000 ? 0 : 1)}s`;
+}
+
+function toIsoStamp(value: number | undefined): string | undefined {
+	if (typeof value !== 'number' || !Number.isFinite(value)) {
+		return undefined;
+	}
+	return new Date(value).toISOString();
 }
 
 function normalizeOptionalPath(value: string | undefined): string | undefined {

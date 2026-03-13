@@ -81,7 +81,7 @@ export type CorrecaoState = {
 	runtimeInfo?: CorrecaoRuntimeInfo;
 };
 
-type MessageHandler = (message: any, webview: vscode.Webview) => void | Promise<void>;
+type MessageHandler = (message: unknown, webview: vscode.Webview) => void | Promise<void>;
 
 export class CorrecaoViewProvider implements vscode.WebviewViewProvider {
 	private view?: vscode.WebviewView;

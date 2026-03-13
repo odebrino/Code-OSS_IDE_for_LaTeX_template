@@ -13,6 +13,8 @@ import * as yazl from 'yazl';
 import {
 	TemplateBuildResult,
 	TemplateBuildService,
+	TemplateBuildStatus,
+	TemplateBuildContext,
 	TemplateFieldSchema,
 	TemplateManifest,
 	TemplatePackage,
@@ -124,6 +126,7 @@ type DiagramadorBuildServiceLike = vscode.Disposable & {
 		previewData: Record<string, any>;
 		outDir: string;
 		fast?: boolean;
+		context?: TemplateBuildContext;
 	}): void;
 };
 
@@ -475,6 +478,9 @@ export class DiagramadorController implements vscode.Disposable {
 
 	async handleMessage(message: DiagramadorWebviewMessage | unknown, webview?: DiagramadorMessageTarget) {
 		if (!isDiagramadorWebviewMessage(message)) {
+			this.logEvent('webview.invalid_message', {
+				type: typeof (message as { type?: unknown } | null)?.type === 'string' ? String((message as { type: string }).type) : 'unknown'
+			});
 			return;
 		}
 		try {
@@ -552,14 +558,32 @@ export class DiagramadorController implements vscode.Disposable {
 			}
 		} catch (err) {
 			const details = err instanceof Error ? err.message : String(err);
-			this.output.appendLine(`[${new Date().toISOString()}] Falha ao processar acao: ${details}`);
-			void this.ui.showErrorMessage(`Falha ao processar acao: ${details}`);
+			this.output.appendLine(`[${new Date().toISOString()}] Falha ao processar acao (${message.type}): ${details}`);
+			void this.ui.showErrorMessage('Nao foi possivel processar a acao. Verifique o log da extensao se o problema persistir.');
 			this.viewProvider?.sendState(this.getState());
 		}
 	}
 
 	log(message: string) {
 		this.output.appendLine(`[${new Date().toISOString()}] ${message}`);
+	}
+
+	private logEvent(event: string, fields: Record<string, string | number | boolean | undefined>) {
+		const values = Object.entries(fields)
+			.filter(([, value]) => value !== undefined && value !== '')
+			.map(([key, value]) => `${key}=${formatLogValue(value!)}`);
+		this.log(values.length ? `${event} ${values.join(' ')}` : event);
+	}
+
+	private logPreviewOutcome(scope: 'document' | 'template', result: PreviewOpenResult, extra: Record<string, string | undefined>) {
+		this.logEvent('preview.resolve', {
+			...extra,
+			scope,
+			state: result.state,
+			mode: result.modeUsed,
+			reason: result.reasonCode,
+			details: result.details.length > 0
+		});
 	}
 
 	private setActiveTab(tab: any) {
@@ -756,11 +780,26 @@ export class DiagramadorController implements vscode.Disposable {
 		}
 		this.buildOutDir = this.paths.outDir;
 		const fastBuild = this.getFastBuildSetting();
+		this.logEvent('build.schedule', {
+			component: 'co-diagramador',
+			scope: 'document',
+			taskId: this.currentTaskId,
+			templateId: resolvedTemplate.manifest.id,
+			fast: fastBuild,
+			trigger: 'document-update'
+		});
 		this.buildService.schedule({
 			template: resolvedTemplate,
 			previewData: this.project.data ?? {},
 			outDir: this.paths.outDir,
-			fast: fastBuild
+			fast: fastBuild,
+			context: {
+				component: 'co-diagramador',
+				scope: 'document',
+				templateId: resolvedTemplate.manifest.id,
+				documentId: this.currentTaskId,
+				trigger: 'document-update'
+			}
 		});
 	}
 
@@ -1085,11 +1124,24 @@ export class DiagramadorController implements vscode.Disposable {
 		const fastBuild = this.getFastBuildSetting();
 		const outDir = path.join(this.paths.templatePreviewDir, this.editorTemplate.manifest.id);
 		this.templateBuildOutDir = outDir;
+		this.logEvent('build.schedule', {
+			component: 'co-diagramador',
+			scope: 'template',
+			templateId: this.editorTemplate.manifest.id,
+			fast: fastBuild,
+			trigger: 'template-editor'
+		});
 		this.templateBuildService.schedule({
 			template: this.editorTemplate,
 			previewData: this.editorTemplate.previewData ?? {},
 			outDir,
-			fast: fastBuild
+			fast: fastBuild,
+			context: {
+				component: 'co-diagramador',
+				scope: 'template',
+				templateId: this.editorTemplate.manifest.id,
+				trigger: 'template-editor'
+			}
 		});
 	}
 
@@ -1101,6 +1153,10 @@ export class DiagramadorController implements vscode.Disposable {
 		}
 		const previewPath = path.join(this.paths.templatePreviewDir, this.editorTemplate.manifest.id, PREVIEW_PDF_NAME);
 		const result = await this.resolvePreviewForScope('template', previewPath);
+		this.logPreviewOutcome('template', result, {
+			component: 'co-diagramador',
+			templateId: this.editorTemplate.manifest.id
+		});
 		this.templatePreviewInfo = toPreviewInfo(result, previewPath);
 		this.viewProvider?.sendState(this.getState());
 	}
@@ -1590,6 +1646,11 @@ export class DiagramadorController implements vscode.Disposable {
 			return;
 		}
 		const result = await this.resolvePreviewForScope('document', this.paths.previewPdfPath);
+		this.logPreviewOutcome('document', result, {
+			component: 'co-diagramador',
+			taskId: this.currentTaskId,
+			templateId: this.project.templateId
+		});
 		this.previewInfo = toPreviewInfo(result, this.paths.previewPdfPath);
 		this.viewProvider?.sendState(this.getState());
 	}
@@ -1633,6 +1694,16 @@ export class DiagramadorController implements vscode.Disposable {
 		if (result.ok) {
 			const shouldOpenPreview = this.activeTab === 'document' || this.openDocumentPreviewOnNextSuccess;
 			this.buildError = undefined;
+			this.logEvent('build.complete', {
+				component: 'co-diagramador',
+				scope: 'document',
+				buildId: result.diagnostics?.buildId,
+				taskId: result.diagnostics?.context?.documentId ?? this.currentTaskId,
+				templateId: result.diagnostics?.context?.templateId ?? this.project.templateId,
+				cacheHit: result.diagnostics?.cacheHit,
+				durationMs: result.diagnostics?.durationMs,
+				logPath: result.logPath
+			});
 			this.openDocumentPreviewOnNextSuccess = false;
 			this.viewProvider?.sendState(this.getState());
 			if (shouldOpenPreview) {
@@ -1641,16 +1712,24 @@ export class DiagramadorController implements vscode.Disposable {
 			return;
 		}
 		this.buildError = description.summary;
+		this.logEvent('build.failed', {
+			component: 'co-diagramador',
+			scope: 'document',
+			buildId: result.diagnostics?.buildId,
+			taskId: result.diagnostics?.context?.documentId ?? this.currentTaskId,
+			templateId: result.diagnostics?.context?.templateId ?? this.project.templateId,
+			failureCode: result.failureCode,
+			durationMs: result.diagnostics?.durationMs,
+			logPath: result.logPath
+		});
 		this.output.appendLine(`[${new Date().toISOString()}] ${description.summary}`);
 		if (description.detail) {
 			this.output.appendLine(description.detail);
 		}
-		if (result.stdout) {
-			this.output.appendLine(result.stdout);
+		if (result.diagnostics?.stderrTail) {
+			this.output.appendLine(`stderr: ${result.diagnostics.stderrTail}`);
 		}
-		if (result.stderr) {
-			this.output.appendLine(result.stderr);
-		}
+		this.output.appendLine(`buildLog: ${result.logPath}`);
 		const shouldOpenPreview = this.activeTab === 'document' || this.openDocumentPreviewOnNextSuccess;
 		this.openDocumentPreviewOnNextSuccess = false;
 		if (shouldOpenPreview) {
@@ -1659,11 +1738,18 @@ export class DiagramadorController implements vscode.Disposable {
 		this.viewProvider?.sendState(this.getState());
 	}
 
-	private handleStatus(status: DiagramadorStatus) {
-		this.status = status;
+	private handleStatus(status: TemplateBuildStatus) {
+		this.status = { state: status.state, message: status.message };
 		if (status.state === 'building') {
 			this.buildError = undefined;
 			this.buildDetails = undefined;
+			this.logEvent('build.started', {
+				component: 'co-diagramador',
+				scope: status.context?.scope ?? 'document',
+				buildId: status.buildId,
+				taskId: status.context?.documentId ?? this.currentTaskId,
+				templateId: status.context?.templateId ?? this.project.templateId
+			});
 		}
 		this.viewProvider?.sendState(this.getState());
 		if (status.state === 'success') {
@@ -1691,6 +1777,15 @@ export class DiagramadorController implements vscode.Disposable {
 		};
 		if (result.ok) {
 			this.templateBuildError = undefined;
+			this.logEvent('build.complete', {
+				component: 'co-diagramador',
+				scope: 'template',
+				buildId: result.diagnostics?.buildId,
+				templateId: result.diagnostics?.context?.templateId ?? this.editorTemplate?.manifest.id,
+				cacheHit: result.diagnostics?.cacheHit,
+				durationMs: result.diagnostics?.durationMs,
+				logPath: result.logPath
+			});
 			this.viewProvider?.sendState(this.getState());
 			if (this.activeTab === 'templates') {
 				void this.openTemplatePreview();
@@ -1698,27 +1793,40 @@ export class DiagramadorController implements vscode.Disposable {
 			return;
 		}
 		this.templateBuildError = description.summary;
+		this.logEvent('build.failed', {
+			component: 'co-diagramador',
+			scope: 'template',
+			buildId: result.diagnostics?.buildId,
+			templateId: result.diagnostics?.context?.templateId ?? this.editorTemplate?.manifest.id,
+			failureCode: result.failureCode,
+			durationMs: result.diagnostics?.durationMs,
+			logPath: result.logPath
+		});
 		this.output.appendLine(`[${new Date().toISOString()}] ${description.summary}`);
 		if (description.detail) {
 			this.output.appendLine(description.detail);
 		}
-		if (result.stdout) {
-			this.output.appendLine(result.stdout);
+		if (result.diagnostics?.stderrTail) {
+			this.output.appendLine(`stderr: ${result.diagnostics.stderrTail}`);
 		}
-		if (result.stderr) {
-			this.output.appendLine(result.stderr);
-		}
+		this.output.appendLine(`buildLog: ${result.logPath}`);
 		if (this.activeTab === 'templates') {
 			void this.openTemplatePreview();
 		}
 		this.viewProvider?.sendState(this.getState());
 	}
 
-	private handleTemplateStatus(status: DiagramadorStatus) {
-		this.templateStatus = status;
+	private handleTemplateStatus(status: TemplateBuildStatus) {
+		this.templateStatus = { state: status.state, message: status.message };
 		if (status.state === 'building') {
 			this.templateBuildError = undefined;
 			this.templateBuildDetails = undefined;
+			this.logEvent('build.started', {
+				component: 'co-diagramador',
+				scope: status.context?.scope ?? 'template',
+				buildId: status.buildId,
+				templateId: status.context?.templateId ?? this.editorTemplate?.manifest.id
+			});
 		}
 		this.viewProvider?.sendState(this.getState());
 		if ((status.state === 'building' || status.state === 'error') && this.activeTab === 'templates') {
@@ -1744,6 +1852,14 @@ function toPreviewInfo(result: PreviewOpenResult, previewPath: string): Diagrama
 		details: result.details,
 		path: previewPath
 	};
+}
+
+function formatLogValue(value: string | number | boolean): string {
+	if (typeof value === 'number' || typeof value === 'boolean') {
+		return String(value);
+	}
+	const normalized = value.replace(/\s+/g, ' ').trim();
+	return /["=\s]/.test(normalized) ? JSON.stringify(normalized) : normalized;
 }
 
 function resolveDiagramadorPaths(storageBaseDir: string, runtimeBaseDir: string): DiagramadorPaths {

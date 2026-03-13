@@ -15,18 +15,31 @@ type ResolveCandidatesInput = {
 	cwd?: string;
 };
 
-export function resolveAdminPath(extensionPath: string, configuredPath: string): string {
-	if (path.isAbsolute(configuredPath)) {
-		return configuredPath;
+export function resolveAdminPath(extensionPath: string, configuredPath: string): string | undefined {
+	const normalized = configuredPath.trim();
+	if (!normalized) {
+		return undefined;
 	}
-	return path.join(extensionPath, configuredPath);
+	if (path.isAbsolute(normalized)) {
+		return path.normalize(normalized);
+	}
+	const root = path.resolve(extensionPath);
+	const candidate = path.resolve(root, normalized);
+	const relative = path.relative(root, candidate);
+	if (relative === '' || relative.startsWith('..') || path.isAbsolute(relative)) {
+		return undefined;
+	}
+	return candidate;
 }
 
 export function resolveAdminsPathCandidates(input: ResolveCandidatesInput): string[] {
 	const candidates: string[] = [];
 	const configuredPath = input.configuredPath?.trim();
 	if (configuredPath) {
-		candidates.push(resolveAdminPath(input.extensionPath, configuredPath));
+		const resolvedConfigured = resolveAdminPath(input.extensionPath, configuredPath);
+		if (resolvedConfigured) {
+			candidates.push(resolvedConfigured);
+		}
 	}
 	const repoRootFromExtension = path.resolve(input.extensionPath, '..', '..');
 	candidates.push(path.join(repoRootFromExtension, ADMINS_SECRET_RELATIVE_PATH));

@@ -107,10 +107,16 @@ export class LocalStorageProvider implements StorageProvider {
 	}
 
 	private resolvePath(relativePath: string): string {
+		const rootDir = path.resolve(this.baseDir);
 		if (!relativePath) {
-			return this.baseDir;
+			return rootDir;
 		}
-		return path.join(this.baseDir, relativePath);
+		const target = path.resolve(rootDir, relativePath);
+		const relative = path.relative(rootDir, target);
+		if (relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative))) {
+			return target;
+		}
+		throw new Error('Storage path escapes base directory.');
 	}
 }
 

@@ -11,6 +11,7 @@ import {
 	describeTemplateBuildFailure,
 	TemplateManifest,
 	TemplatePackage,
+	TemplateBuildService,
 	buildPreview,
 	renderTemplate,
 	validateTemplate
@@ -159,6 +160,62 @@ suite('Template Core', () => {
 			assert.match(result.friendly, /Tectonic/);
 			assert.ok(result.diagnostics?.command);
 			assert.ok(result.logPath.endsWith('build.log'));
+			assert.strictEqual(result.diagnostics?.context?.templateId, 'demo-not-found');
+		} finally {
+			if (prev === undefined) {
+				delete process.env.TECTONIC_PATH;
+			} else {
+				process.env.TECTONIC_PATH = prev;
+			}
+			await fs.rm(tempRoot, { recursive: true, force: true });
+		}
+	});
+
+	test('buildPreview registra contexto operacional no build.log', async () => {
+		const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'co-template-core-'));
+		const outDir = path.join(tempRoot, 'out');
+		const assetsDir = path.join(tempRoot, 'assets');
+		await fs.mkdir(assetsDir, { recursive: true });
+		const manifest: TemplateManifest = {
+			id: 'demo-observability',
+			name: 'Demo',
+			version: '1.0.0',
+			description: 'Demo template',
+			entry: 'main.tex',
+			schema: [{ key: 'Title', type: 'string', label: 'Title' }]
+		};
+		const template: TemplatePackage = {
+			manifest,
+			dir: tempRoot,
+			entryPath: path.join(tempRoot, 'main.tex'),
+			assetsDir,
+			mainTex: String.raw`\\documentclass{article}\\begin{document}{{Title}}\\end{document}`,
+			previewData: {},
+			readOnly: false
+		};
+		const prev = process.env.TECTONIC_PATH;
+		process.env.TECTONIC_PATH = '__missing_tectonic__';
+		try {
+			const result = await buildPreview(template, { Title: 'Teste' }, outDir, {
+				buildId: 'build-test-42',
+				context: {
+					component: 'co-test',
+					scope: 'document',
+					templateId: manifest.id,
+					documentId: 'task-123',
+					trigger: 'unit-test'
+				},
+				queuedAt: Date.now() - 10,
+				startedAt: Date.now()
+			});
+			assert.strictEqual(result.diagnostics?.buildId, 'build-test-42');
+			assert.strictEqual(result.diagnostics?.context?.component, 'co-test');
+			assert.strictEqual(result.diagnostics?.context?.documentId, 'task-123');
+			assert.strictEqual(typeof result.diagnostics?.durationMs, 'number');
+			const logContent = await fs.readFile(result.logPath, 'utf8');
+			assert.match(logContent, /buildId: build-test-42/);
+			assert.match(logContent, /component: co-test/);
+			assert.match(logContent, /documentId: task-123/);
 		} finally {
 			if (prev === undefined) {
 				delete process.env.TECTONIC_PATH;
@@ -257,6 +314,78 @@ suite('Template Core', () => {
 				delete process.env.TECTONIC_PATH;
 			} else {
 				process.env.TECTONIC_PATH = prevTectonic;
+			}
+			await fs.rm(tempRoot, { recursive: true, force: true });
+		}
+	});
+
+	test('TemplateBuildService propaga contexto e duracao nos eventos', async () => {
+		const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'co-template-core-'));
+		const outDir = path.join(tempRoot, 'out');
+		const assetsDir = path.join(tempRoot, 'assets');
+		await fs.mkdir(assetsDir, { recursive: true });
+		const manifest: TemplateManifest = {
+			id: 'demo-service',
+			name: 'Demo',
+			version: '1.0.0',
+			description: 'Demo template',
+			entry: 'main.tex',
+			schema: [{ key: 'Title', type: 'string', label: 'Title' }]
+		};
+		const template: TemplatePackage = {
+			manifest,
+			dir: tempRoot,
+			entryPath: path.join(tempRoot, 'main.tex'),
+			assetsDir,
+			mainTex: String.raw`\\documentclass{article}\\begin{document}{{Title}}\\end{document}`,
+			previewData: {},
+			readOnly: false
+		};
+		const prev = process.env.TECTONIC_PATH;
+		process.env.TECTONIC_PATH = '__missing_tectonic__';
+		const statuses: Array<{ state: string; buildId?: string; durationMs?: number; component?: string }> = [];
+		let service: TemplateBuildService | undefined;
+		try {
+			const result = await new Promise<Awaited<ReturnType<typeof buildPreview>>>(resolve => {
+				service = new TemplateBuildService({
+					debounceMs: 0,
+					onStatus: status => {
+						statuses.push({
+							state: status.state,
+							buildId: status.buildId,
+							durationMs: status.durationMs,
+							component: status.context?.component
+						});
+					},
+					onComplete: resolve
+				});
+				service.schedule({
+					template,
+					previewData: { Title: 'Teste' },
+					outDir,
+					context: {
+						component: 'co-test',
+						scope: 'document',
+						templateId: manifest.id,
+						documentId: 'task-1',
+						trigger: 'unit-test'
+					}
+				});
+			});
+			assert.strictEqual(result.ok, false);
+			assert.ok(statuses.length >= 2);
+			assert.strictEqual(statuses[0].state, 'building');
+			assert.strictEqual(statuses[0].component, 'co-test');
+			assert.ok(statuses[0].buildId);
+			assert.strictEqual(statuses[1].buildId, statuses[0].buildId);
+			assert.strictEqual(statuses[1].state, 'error');
+			assert.strictEqual(typeof statuses[1].durationMs, 'number');
+		} finally {
+			service?.dispose();
+			if (prev === undefined) {
+				delete process.env.TECTONIC_PATH;
+			} else {
+				process.env.TECTONIC_PATH = prev;
 			}
 			await fs.rm(tempRoot, { recursive: true, force: true });
 		}

@@ -54,7 +54,12 @@ export async function activate(context: vscode.ExtensionContext) {
 			if (!email) {
 				return;
 			}
-			const ok = await isAdminEmail(context, email);
+			const admins = await loadAdmins(context);
+			if (!admins.length) {
+				vscode.window.showErrorMessage('Nenhuma lista de admins valida foi encontrada. Verifique coShell.adminsFile ou co-secret/config/admins.json.');
+				return;
+			}
+			const ok = isAdminEmailForList(email, admins);
 			if (!ok) {
 				vscode.window.showErrorMessage('Email nao esta na whitelist de admins.');
 				return;
@@ -178,11 +183,6 @@ function createMessageHandler(context: vscode.ExtensionContext) {
 			}
 		}
 	};
-}
-
-async function isAdminEmail(context: vscode.ExtensionContext, email: string): Promise<boolean> {
-	const admins = await loadAdmins(context);
-	return isAdminEmailForList(email, admins);
 }
 
 async function loadAdmins(context: vscode.ExtensionContext): Promise<string[]> {

@@ -49,6 +49,54 @@ suite('Template Core Storage', () => {
 		}
 	});
 
+	test('loadTemplate ignora template incompleto sem main.tex', async () => {
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), 'co-template-storage-'));
+		try {
+			const manifest: TemplateManifest = {
+				id: 'template-sem-main',
+				name: 'Template Sem Main',
+				version: '1.0.0',
+				description: 'Template quebrado',
+				entry: 'main.tex',
+				schema: [{ key: 'Title', type: 'string', label: 'Titulo' }]
+			};
+			const dir = path.join(root, manifest.id);
+			await fs.mkdir(dir, { recursive: true });
+			await fs.writeFile(path.join(dir, 'template.json'), JSON.stringify(manifest, null, 2), 'utf8');
+			await fs.writeFile(path.join(dir, 'preview_data.json'), '{"Title":"OK"}', 'utf8');
+
+			const loaded = await loadTemplate(root, manifest.id);
+			assert.strictEqual(loaded, undefined);
+		} finally {
+			await fs.rm(root, { recursive: true, force: true });
+		}
+	});
+
+	test('loadTemplate usa preview_data vazio quando o arquivo esta corrompido', async () => {
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), 'co-template-storage-'));
+		try {
+			const manifest: TemplateManifest = {
+				id: 'template-preview-corrompido',
+				name: 'Template Preview Corrompido',
+				version: '1.0.0',
+				description: 'Template para recovery',
+				entry: 'main.tex',
+				schema: [{ key: 'Title', type: 'string', label: 'Titulo' }]
+			};
+			const dir = path.join(root, manifest.id);
+			await fs.mkdir(dir, { recursive: true });
+			await fs.writeFile(path.join(dir, 'template.json'), JSON.stringify(manifest, null, 2), 'utf8');
+			await fs.writeFile(path.join(dir, 'main.tex'), '\\documentclass{article}', 'utf8');
+			await fs.writeFile(path.join(dir, 'preview_data.json'), '{ invalid json', 'utf8');
+
+			const loaded = await loadTemplate(root, manifest.id);
+			assert.ok(loaded);
+			assert.deepStrictEqual(loaded?.previewData, {});
+		} finally {
+			await fs.rm(root, { recursive: true, force: true });
+		}
+	});
+
 	test('scanTemplateStorage reporta manifestos invalidos sem sumir silenciosamente', async () => {
 		const root = await fs.mkdtemp(path.join(os.tmpdir(), 'co-template-scan-'));
 		try {

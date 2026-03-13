@@ -11,6 +11,7 @@ import {
 	isAdminEmailForList,
 	loadAdminsFrom,
 	parseAdminsJson,
+	resolveAdminPath,
 	resolveAdminsPathCandidates,
 	resolveExistingAdminsPath
 } from '../../lib/admins';
@@ -36,6 +37,21 @@ suite('CO Shell Admin Helpers', () => {
 			target => target.endsWith('/co-secret/config/admins.json')
 		);
 		assert.ok(ordered?.endsWith('/co-secret/config/admins.json'));
+	});
+
+	test('resolveAdminPath bloqueia caminho relativo com escape', () => {
+		assert.strictEqual(resolveAdminPath('/repo/extensions/co-shell', '../admins.json'), undefined);
+		assert.strictEqual(resolveAdminPath('/repo/extensions/co-shell', '../../co-secret/config/admins.json'), undefined);
+	});
+
+	test('resolveAdminsPathCandidates ignora configuracao relativa insegura', () => {
+		const candidates = resolveAdminsPathCandidates({
+			extensionPath: '/repo/extensions/co-shell',
+			configuredPath: '../../co-secret/config/admins.json',
+			cwd: '/repo'
+		});
+		assert.ok(!candidates.some(item => item.includes('/extensions/co-secret/')));
+		assert.ok(candidates.some(item => item.endsWith('/co-secret/config/admins.json')));
 	});
 
 	test('loadAdminsFrom retorna vazio em arquivo invalido', async () => {

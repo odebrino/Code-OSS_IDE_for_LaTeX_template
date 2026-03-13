@@ -270,9 +270,76 @@ export type DiagramadorHostMessage =
 	| DiagramadorCreateTaskValidationMessage;
 
 export function isDiagramadorWebviewMessage(value: unknown): value is DiagramadorWebviewMessage {
-	if (!value || typeof value !== 'object') {
+	if (!isPlainObject(value) || typeof value.type !== 'string') {
 		return false;
 	}
-	const candidate = value as { type?: unknown };
-	return typeof candidate.type === 'string';
+	switch (value.type) {
+		case 'ready':
+		case 'backToList':
+		case 'templateCreate':
+		case 'templateDuplicate':
+		case 'templateDelete':
+		case 'templateExport':
+		case 'templateImport':
+			return true;
+		case 'setTab':
+			return value.tab === 'document' || value.tab === 'templates';
+		case 'openTask':
+		case 'deleteTask':
+			return typeof value.taskId === 'string';
+		case 'updateTemplate':
+		case 'templateSelect':
+			return typeof value.templateId === 'string';
+		case 'templateDeleteAsset':
+			return typeof value.name === 'string';
+		case 'createTask':
+			return isOptionalString(value.label)
+				&& isOptionalTaskType(value.taskType)
+				&& isOptionalString(value.templateId);
+		case 'renameTask':
+			return typeof value.taskId === 'string' && isOptionalString(value.label);
+		case 'updateField':
+			return typeof value.key === 'string' && (!Object.prototype.hasOwnProperty.call(value, 'value') || isDiagramadorFieldValue(value.value));
+		case 'templateSave':
+			return typeof value.manifestText === 'string'
+				&& typeof value.mainTex === 'string'
+				&& typeof value.previewText === 'string'
+				&& isOptionalString(value.previousId);
+		case 'templateAddAsset':
+			return typeof value.name === 'string' && typeof value.contents === 'string';
+		case 'openBuildLog':
+		case 'openBuildFolder':
+		case 'retryBuild':
+			return value.scope === 'document' || value.scope === 'template';
+		case 'confirmRequest':
+			return typeof value.requestId === 'string'
+				&& typeof value.message === 'string'
+				&& isOptionalString(value.title)
+				&& isOptionalString(value.detail)
+				&& isOptionalString(value.confirmLabel)
+				&& isOptionalString(value.cancelLabel)
+				&& (value.severity === undefined || value.severity === 'warning' || value.severity === 'info');
+		default:
+			return false;
+	}
+}
+
+function isPlainObject(value: unknown): value is Record<string, any> {
+	return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function isOptionalString(value: unknown): value is string | undefined {
+	return value === undefined || typeof value === 'string';
+}
+
+function isOptionalTaskType(value: unknown): value is DiagramadorTaskType | undefined {
+	return value === undefined || value === 'teorica' || value === 'pratica' || value === 'salinha';
+}
+
+function isDiagramadorFieldValue(value: unknown): value is DiagramadorFieldValue {
+	return value === null
+		|| typeof value === 'string'
+		|| (typeof value === 'number' && Number.isFinite(value))
+		|| typeof value === 'boolean'
+		|| (Array.isArray(value) && value.every(item => typeof item === 'string'));
 }

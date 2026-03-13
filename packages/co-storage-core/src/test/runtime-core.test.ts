@@ -4,8 +4,10 @@
  *--------------------------------------------------------------------------------------------*/
 
 import * as assert from 'assert';
+import * as fs from 'fs/promises';
+import * as os from 'os';
 import * as path from 'path';
-import { resolveCoPaths, resolveCoPersistentPaths, resolveCoRuntimeDir } from '../index';
+import { LocalStorageProvider, resolveCoPaths, resolveCoPersistentPaths, resolveCoRuntimeDir } from '../index';
 
 declare const suite: (name: string, fn: () => void) => void;
 declare const test: (name: string, fn: () => void | Promise<void>) => void;
@@ -80,5 +82,16 @@ suite('CO Storage Runtime', () => {
 		assert.strictEqual(resolution.runtime.relocated, true);
 		assert.strictEqual(resolution.runtime.reason, 'hidden_path_under_snap');
 		assert.match(resolution.runtime.baseDir, /CO-runtime/);
+	});
+
+	test('rejeita paths relativos que escapam do diretorio base', async () => {
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), 'co-storage-provider-'));
+		const storage = new LocalStorageProvider(root);
+		try {
+			await assert.rejects(() => storage.writeFileAtomic('../escape.txt', 'blocked'), /escapes base directory/i);
+			await assert.rejects(() => storage.readFile(path.join(path.sep, 'tmp', 'escape.txt')), /escapes base directory/i);
+		} finally {
+			await fs.rm(root, { recursive: true, force: true });
+		}
 	});
 });

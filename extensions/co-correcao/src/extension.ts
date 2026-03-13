@@ -12,6 +12,7 @@ import {
 	TemplateBuildResult,
 	TemplateBuildService,
 	TemplateBuildStatus,
+	TemplateBuildContext,
 	TemplatePackage,
 	TemplateStoragePaths,
 	describeTemplateBuildFailure,
@@ -38,6 +39,17 @@ import {
 	CorrecaoTaskSummary,
 	registerCorrecaoView
 } from './webview';
+import { isCorrecaoWebviewMessage } from './protocol';
+import {
+	CorrectionBaseFile,
+	CorrectionIndexFile,
+	CorrectionOp,
+	CorrectionRevisionFile,
+	FieldType,
+	normalizeCorrectionBaseFile,
+	normalizeCorrectionIndexFile,
+	normalizeCorrectionRevisionFile
+} from './persistence';
 import { resolveCorrecaoStoragePaths } from './paths';
 
 const TASKS_DIR_NAME = 'tarefas';
@@ -109,43 +121,9 @@ export function deactivate(): void {
 	// no-op
 }
 
-type FieldType = 'string' | 'string[]';
-
 type TaskProject = {
 	templateId?: string;
 	data?: Record<string, any>;
-};
-
-type CorrectionOp = {
-	op: 'replace' | 'insert' | 'comment';
-	start?: number;
-	end?: number;
-	at?: number;
-	text: string;
-	status?: 'pending' | 'accepted' | 'rejected';
-};
-
-type CorrectionBaseFile = {
-	baseHash: string;
-	createdAt: string;
-	taskId: string;
-	templateId: string;
-	fieldKey: string;
-	fieldType: FieldType;
-	text: string;
-};
-
-type CorrectionIndexFile = {
-	baseHash: string;
-	revisions: Array<{ id: string; createdAt: string; parent: string | 'base' }>;
-};
-
-type CorrectionRevisionFile = {
-	id: string;
-	parent: string | 'base';
-	baseHash: string;
-	createdAt: string;
-	ops: CorrectionOp[];
 };
 
 class CorrecaoController implements vscode.Disposable {
@@ -278,48 +256,61 @@ class CorrecaoController implements vscode.Disposable {
 		return this.correctionsBaseDir;
 	}
 
-	async handleMessage(message: any): Promise<void> {
-		switch (message?.type) {
-			case 'ready':
-				this.viewProvider?.sendState(this.getState());
-				return;
-			case 'selectTask':
-				await this.selectTask(message?.taskId);
-				return;
-			case 'refreshTasks':
-				await this.refreshTasks();
-				this.viewProvider?.sendState(this.getState());
-				return;
-			case 'selectField':
-				await this.selectField(message?.key);
-				return;
-			case 'selectRevision':
-				await this.selectRevision(message?.revisionId);
-				return;
-			case 'newRevision':
-				await this.createRevision();
-				return;
-			case 'addSuggestion':
-				await this.addSuggestion(message);
-				return;
-			case 'acceptSuggestion':
-				await this.updateSuggestionStatus(message?.revisionId, message?.index, 'accepted');
-				return;
-			case 'rejectSuggestion':
-				await this.updateSuggestionStatus(message?.revisionId, message?.index, 'rejected');
-				return;
-			case 'openBuildLog':
-				await this.openBuildLog();
-				return;
-			case 'openBuildFolder':
-				await this.openBuildFolder();
-				return;
-			case 'retryBuild':
-				await this.scheduleBuild();
-				await this.openPreview();
-				return;
-			default:
-				return;
+	async handleMessage(message: unknown): Promise<void> {
+		if (!isCorrecaoWebviewMessage(message)) {
+			this.logEvent('webview.invalid_message', {
+				type: typeof (message as { type?: unknown } | null)?.type === 'string' ? String((message as { type: string }).type) : 'unknown'
+			});
+			return;
+		}
+		try {
+			switch (message.type) {
+				case 'ready':
+					this.viewProvider?.sendState(this.getState());
+					return;
+				case 'selectTask':
+					await this.selectTask(message.taskId);
+					return;
+				case 'refreshTasks':
+					await this.refreshTasks();
+					this.viewProvider?.sendState(this.getState());
+					return;
+				case 'selectField':
+					await this.selectField(message.key);
+					return;
+				case 'selectRevision':
+					await this.selectRevision(message.revisionId);
+					return;
+				case 'newRevision':
+					await this.createRevision();
+					return;
+				case 'addSuggestion':
+					await this.addSuggestion(message);
+					return;
+				case 'acceptSuggestion':
+					await this.updateSuggestionStatus(message.revisionId, message.index, 'accepted');
+					return;
+				case 'rejectSuggestion':
+					await this.updateSuggestionStatus(message.revisionId, message.index, 'rejected');
+					return;
+				case 'openBuildLog':
+					await this.openBuildLog();
+					return;
+				case 'openBuildFolder':
+					await this.openBuildFolder();
+					return;
+				case 'retryBuild':
+					await this.scheduleBuild();
+					await this.openPreview();
+					return;
+				default:
+					return;
+			}
+		} catch (err) {
+			const details = err instanceof Error ? err.message : String(err);
+			this.output.appendLine(`[${new Date().toISOString()}] Falha ao processar acao (${message.type}): ${details}`);
+			void vscode.window.showErrorMessage('Nao foi possivel processar a acao. Verifique o log da extensao se o problema persistir.');
+			this.viewProvider?.sendState(this.getState());
 		}
 	}
 
@@ -535,8 +526,12 @@ class CorrecaoController implements vscode.Disposable {
 		const raw = await this.correctionsStorage.readFile(basePath);
 		if (raw) {
 			try {
-				const parsed = JSON.parse(raw) as CorrectionBaseFile;
-				if (parsed.baseHash === this.baseHash && parsed.fieldKey === this.selectedFieldKey) {
+				const parsed = normalizeCorrectionBaseFile(JSON.parse(raw) as unknown);
+				if (parsed
+					&& parsed.baseHash === this.baseHash
+					&& parsed.fieldKey === this.selectedFieldKey
+					&& parsed.fieldType === this.selectedFieldType
+					&& parsed.text === this.baseText) {
 					return;
 				}
 			} catch {
@@ -569,9 +564,13 @@ class CorrecaoController implements vscode.Disposable {
 			return;
 		}
 		try {
-			const parsed = JSON.parse(raw) as CorrectionIndexFile;
-			if (parsed?.baseHash === this.baseHash && Array.isArray(parsed.revisions)) {
+			const parsedRaw = JSON.parse(raw) as unknown;
+			const parsed = normalizeCorrectionIndexFile(parsedRaw);
+			if (parsed?.baseHash === this.baseHash) {
 				this.revisionIndex = parsed;
+				if (JSON.stringify(parsedRaw) !== JSON.stringify(parsed)) {
+					await this.saveRevisionIndex();
+				}
 				return;
 			}
 		} catch {
@@ -619,11 +618,14 @@ class CorrecaoController implements vscode.Disposable {
 			return null;
 		}
 		try {
-			const parsed = JSON.parse(raw) as CorrectionRevisionFile;
-			if (!parsed || typeof parsed.id !== 'string') {
+			const parsedRaw = JSON.parse(raw) as unknown;
+			const parsed = normalizeCorrectionRevisionFile(parsedRaw, revisionId);
+			if (!parsed || parsed.baseHash !== this.baseHash) {
 				return null;
 			}
-			parsed.ops = Array.isArray(parsed.ops) ? parsed.ops : [];
+			if (JSON.stringify(parsedRaw) !== JSON.stringify(parsed)) {
+				await this.saveRevisionFile(parsed);
+			}
 			return parsed;
 		} catch {
 			return null;
@@ -671,19 +673,43 @@ class CorrecaoController implements vscode.Disposable {
 		const outDir = this.getPreviewOutDir();
 		this.buildOutDir = outDir;
 		await fs.mkdir(outDir, { recursive: true });
+		this.logEvent('build.schedule', {
+			component: 'co-correcao',
+			scope: 'document',
+			taskId: this.selectedTaskId,
+			fieldKey: this.selectedFieldKey,
+			templateId,
+			fast: true,
+			trigger: 'revision-update'
+		});
 		this.buildService.schedule({
 			template,
 			previewData,
 			outDir,
-			fast: true
+			fast: true,
+			context: {
+				component: 'co-correcao',
+				scope: 'document',
+				templateId,
+				documentId: this.selectedTaskId,
+				trigger: 'revision-update'
+			} satisfies TemplateBuildContext
 		});
 	}
 
 	private handleBuildStatus(status: TemplateBuildStatus) {
-		this.status = status;
+		this.status = { state: status.state, message: status.message };
 		if (status.state === 'building') {
 			this.buildError = undefined;
 			this.buildDetails = undefined;
+			this.logEvent('build.started', {
+				component: 'co-correcao',
+				scope: status.context?.scope ?? 'document',
+				buildId: status.buildId,
+				taskId: status.context?.documentId ?? this.selectedTaskId,
+				templateId: status.context?.templateId ?? this.currentProject?.templateId,
+				fieldKey: this.selectedFieldKey
+			});
 		}
 		this.viewProvider?.sendState(this.getState());
 		if (status.state === 'building' || status.state === 'error') {
@@ -702,21 +728,41 @@ class CorrecaoController implements vscode.Disposable {
 		};
 		if (result.ok) {
 			this.buildError = undefined;
+			this.logEvent('build.complete', {
+				component: 'co-correcao',
+				scope: 'document',
+				buildId: result.diagnostics?.buildId,
+				taskId: result.diagnostics?.context?.documentId ?? this.selectedTaskId,
+				templateId: result.diagnostics?.context?.templateId ?? this.currentProject?.templateId,
+				fieldKey: this.selectedFieldKey,
+				cacheHit: result.diagnostics?.cacheHit,
+				durationMs: result.diagnostics?.durationMs,
+				logPath: result.logPath
+			});
 			this.viewProvider?.sendState(this.getState());
 			void this.openPreview();
 			return;
 		}
 		this.buildError = description.summary;
+		this.logEvent('build.failed', {
+			component: 'co-correcao',
+			scope: 'document',
+			buildId: result.diagnostics?.buildId,
+			taskId: result.diagnostics?.context?.documentId ?? this.selectedTaskId,
+			templateId: result.diagnostics?.context?.templateId ?? this.currentProject?.templateId,
+			fieldKey: this.selectedFieldKey,
+			failureCode: result.failureCode,
+			durationMs: result.diagnostics?.durationMs,
+			logPath: result.logPath
+		});
 		this.output.appendLine(`[${new Date().toISOString()}] ${description.summary}`);
 		if (description.detail) {
 			this.output.appendLine(description.detail);
 		}
-		if (result.stdout) {
-			this.output.appendLine(result.stdout);
+		if (result.diagnostics?.stderrTail) {
+			this.output.appendLine(`stderr: ${result.diagnostics.stderrTail}`);
 		}
-		if (result.stderr) {
-			this.output.appendLine(result.stderr);
-		}
+		this.output.appendLine(`buildLog: ${result.logPath}`);
 		this.viewProvider?.sendState(this.getState());
 		void this.openPreview();
 	}
@@ -784,6 +830,17 @@ class CorrecaoController implements vscode.Disposable {
 	private async openPreview(): Promise<void> {
 		const previewPath = this.getPreviewPdfPath();
 		const result = await this.resolvePreview(previewPath);
+		this.logEvent('preview.resolve', {
+			component: 'co-correcao',
+			scope: 'document',
+			taskId: this.selectedTaskId,
+			templateId: this.currentProject?.templateId,
+			fieldKey: this.selectedFieldKey,
+			state: result.state,
+			mode: result.modeUsed,
+			reason: result.reasonCode,
+			details: result.details.length > 0
+		});
 		this.previewInfo = toCorrecaoPreviewInfo(result, previewPath);
 		this.viewProvider?.sendState(this.getState());
 	}
@@ -818,6 +875,13 @@ class CorrecaoController implements vscode.Disposable {
 		return this.previewManager.open(previewPath);
 	}
 
+	private logEvent(event: string, fields: Record<string, string | number | boolean | undefined>) {
+		const values = Object.entries(fields)
+			.filter(([, value]) => value !== undefined && value !== '')
+			.map(([key, value]) => `${key}=${formatCorrecaoLogValue(value!)}`);
+		this.output.appendLine(`[${new Date().toISOString()}] ${values.length ? `${event} ${values.join(' ')}` : event}`);
+	}
+
 	dispose(): void {
 		this.buildService.dispose();
 		this.previewManager.dispose();
@@ -836,6 +900,14 @@ function toCorrecaoPreviewInfo(result: PreviewOpenResult, previewPath: string): 
 	};
 }
 
+function formatCorrecaoLogValue(value: string | number | boolean): string {
+	if (typeof value === 'number' || typeof value === 'boolean') {
+		return String(value);
+	}
+	const normalized = value.replace(/\s+/g, ' ').trim();
+	return /["=\s]/.test(normalized) ? JSON.stringify(normalized) : normalized;
+}
+
 async function listDiagramadorTasks(baseDir: string): Promise<CorrecaoTaskSummary[]> {
 	try {
 		const tasksDir = path.join(baseDir, TASKS_DIR_NAME);
@@ -850,7 +922,7 @@ async function listDiagramadorTasks(baseDir: string): Promise<CorrecaoTaskSummar
 			const label = getTaskLabel(project, id);
 			tasks.push({ id, label });
 		}
-		tasks.sort((a, b) => a.label.localeCompare(b.label));
+		tasks.sort((a, b) => a.label.localeCompare(b.label) || a.id.localeCompare(b.id));
 		return tasks;
 	} catch {
 		return [];
