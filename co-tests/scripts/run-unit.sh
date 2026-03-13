@@ -5,6 +5,9 @@ cd "$(git rev-parse --show-toplevel)"
 
 export TECTONIC_PATH="__missing__"
 
+echo "[co:test:unit] compiling co-doc-core"
+npx tsc -p packages/co-doc-core/tsconfig.json --pretty false
+
 echo "[co:test:unit] compiling co-storage-core"
 npx tsc -p packages/co-storage-core/tsconfig.json --pretty false
 
@@ -25,6 +28,9 @@ npx tsc -p extensions/co-correcao/tsconfig.json --pretty false
 
 echo "[co:test:unit] compiling co-shell"
 npx tsc -p extensions/co-shell/tsconfig.json --pretty false
+
+echo "[co:test:unit] running co-doc-core mocha"
+npx mocha "packages/co-doc-core/out/test/**/*.test.js" --ui tdd --timeout 60000
 
 echo "[co:test:unit] running co-storage-core mocha"
 npx mocha "packages/co-storage-core/out/test/**/*.test.js" --ui tdd --timeout 60000

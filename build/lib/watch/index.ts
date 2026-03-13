@@ -137,7 +137,7 @@ export default function watch(pattern: string | string[] | filter.FileFunction, 
 
 	if (!cached) {
 		const stream = createWatcher(cwd);
-		cached = { stream, subscription: Promise.resolve(null as unknown as watcher.AsyncSubscription) };
+		cached = { stream, subscription: Promise.resolve(null as unknown as WatcherAsyncSubscription) };
 		subscriptionCache.set(cwd, cached);
 	}
 

@@ -52,7 +52,7 @@ suite('CO Diagramador Extension Integration', () => {
 		await vscode.commands.executeCommand('co.diagramador.open');
 	});
 
-	test('createTask persiste metadados, entra em modo task e usa runtime visivel', async () => {
+	test('[smoke] createTask persiste metadados, entra em modo task e usa runtime visivel', async () => {
 		const api = await getApi();
 		api.setBuildOutcome('document', { ok: true });
 
@@ -103,7 +103,7 @@ suite('CO Diagramador Extension Integration', () => {
 		assert.ok(state.schema?.some(field => field.key === 'texto'));
 	});
 
-	test('openTask reabre uma tarefa existente a partir da lista', async () => {
+	test('[smoke] openTask reabre uma tarefa existente a partir da lista', async () => {
 		const api = await getApi();
 		api.setBuildOutcome('document', { ok: true });
 		await api.dispatchMessage({

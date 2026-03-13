@@ -9,10 +9,14 @@ import * as path from 'path';
 const Mocha = require('mocha');
 
 export async function run(): Promise<void> {
+	const grep = (process.env.MOCHA_GREP ?? '').trim();
+	const fgrep = (process.env.MOCHA_FGREP ?? '').trim();
 	const mocha = new Mocha({
 		ui: 'tdd',
 		color: true,
-		timeout: 60000
+		timeout: 60000,
+		grep: grep || undefined,
+		fgrep: fgrep || undefined
 	});
 
 	const suiteRoot = path.resolve(__dirname, 'suite');

@@ -12,20 +12,31 @@ Use `npm ci` em CI ou quando quiser ambiente limpo/reprodutivel. Use `npm instal
 ## Comandos
 
 ```bash
+npm test
 npm run co:test
 npm run co:test:unit
 npm run co:test:ext
+npm run co:test:smoke
 ```
 
-`npm run co:test` executa unit + integration e falha com exit code != 0 se qualquer etapa falhar.
+`npm test` e `npm run co:test` executam unit + integration e falham com exit code != 0 se qualquer etapa falhar.
+`npm run co:test:smoke` roda so a jornada principal de usuario em `co-diagramador` e `co-correcao`, usando as suites de extensao ja existentes com filtro por nome.
 
 ## Escopo
 
 - Unit tests (Node/Mocha):
+  - `packages/co-doc-core`
+  - `packages/co-storage-core`
   - `packages/co-template-core`
+  - `packages/co-preview-core`
   - `extensions/co-diagramador`
+  - `extensions/co-data-set`
+  - `extensions/co-correcao`
   - `extensions/co-shell` (helpers puros)
 - Integration leve headless (sem UI/webview):
+  - `extensions/co-diagramador`
+  - `extensions/co-data-set`
+  - `extensions/co-correcao`
   - `extensions/co-shell`
   - `extensions/co-template-generator`
 
@@ -36,10 +47,12 @@ Todos os runs exportam `TECTONIC_PATH=__missing__` para evitar dependencia de Te
 - Rodar etapas separadas:
   - `bash co-tests/scripts/run-unit.sh`
   - `bash co-tests/scripts/run-ext.sh`
+  - `bash co-tests/scripts/run-smoke.sh`
 - Rodar suites especificas:
   - `npx mocha "packages/co-template-core/out/test/**/*.test.js" --ui tdd --grep "buildPreview"`
   - `npx mocha "extensions/co-shell/out/test/unit/**/*.test.js" --ui tdd --grep "admins"`
   - `npx mocha "extensions/co-template-generator/out/test/integration/**/*.test.js" --ui tdd`
+  - `MOCHA_FGREP='[smoke]' node co-tests/vscode-runner/runExtensionsTests.mjs co-diagramador`
 
 ## Hook local opcional
 

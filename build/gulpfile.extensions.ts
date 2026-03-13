@@ -38,6 +38,7 @@ const compilations = [
 	'extensions/co-data-set/tsconfig.json',
 	'extensions/co-diagramador/tsconfig.json',
 	'extensions/co-shell/tsconfig.json',
+	'extensions/co-template-generator/tsconfig.json',
 	'packages/co-doc-core/tsconfig.json',
 	'packages/co-preview-core/tsconfig.json',
 	'packages/co-storage-core/tsconfig.json',

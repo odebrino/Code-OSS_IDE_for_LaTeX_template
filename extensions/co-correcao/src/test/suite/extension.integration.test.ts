@@ -41,7 +41,7 @@ suite('CO Correcao Extension Integration', () => {
 		assert.match(storage.correctionsBaseDir, /\.co[\/\\]corrections$/);
 	});
 
-	test('carrega tarefa da fixture e prepara preview/runtime', async () => {
+	test('[smoke] carrega tarefa da fixture e prepara preview/runtime', async () => {
 		const api = await getApi();
 		await api.refreshTasks();
 		const before = api.getStateSnapshot();
